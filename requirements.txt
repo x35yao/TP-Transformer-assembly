@@ -1,0 +1,8 @@
+numpy<2
+pandas
+pyyaml
+scipy
+matplotlib
+torch
+h5py
+tables

@@ -1,0 +1,12 @@
+
+project_path: C:\Users\xyao0\Desktop\project\assembly
+data_path: C:\Users\xyao0\Desktop\project\data\assembly
+dlc3d_path: C:\Users\xyao0\Desktop\project\dlc3d
+dlc_path: G:\My Drive\dlc
+template_video_id: 2024-08-27\1724791238
+transformation_path: C:\Users\xyao0\Desktop\project\assembly\transformations\2024-08-28
+objects: [bolt, nut, jig, bin]
+individuals: ['bolt1', 'bolt2', 'bolt3', 'bolt4', 'nut1', 'nut2', 'nut3', 'nut4', 'jig1', 'bin1']
+cameras: [left, right]
+actions: [action_0, action_1, action_2]
+alignment_method: "typeId"

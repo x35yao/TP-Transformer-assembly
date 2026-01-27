@@ -8,10 +8,8 @@ env/
 venv/
 .env
 
-# Data and checkpoints (large files)
-data/
+# Checkpoints (large files, generated during training)
 transformer/
-augmentation/
 
 # Jupyter
 .ipynb_checkpoints/

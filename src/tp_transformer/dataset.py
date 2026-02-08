@@ -17,7 +17,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .augmentation import augment
+from .augmentation import augment, augment_random_rotation
 
 
 def fill_nans(obj_data: np.ndarray) -> np.ndarray:
@@ -76,6 +76,7 @@ class TrajectoryDataset(Dataset):
         covs_all_actions: Dict | None = None,
         augment_data: bool = False,
         traj_obj_ind: int | None = None,
+        augmentation_method: str = "tp",
     ) -> None:
         self.traj_data = traj_data
         self.obj_data = obj_data
@@ -96,6 +97,7 @@ class TrajectoryDataset(Dataset):
         self.release_inds = release_inds
         self.traj_obj_ind = traj_obj_ind
         self.obj_tags = obj_tags
+        self.augmentation_method = augmentation_method  # "tp" or "random"
         
         # obj_moving: per-action mask of which objects move between camera captures.
         # Shape: (n_objs, n_captures) -- True means the object moves during that segment.
@@ -145,48 +147,69 @@ class TrajectoryDataset(Dataset):
         release_inds = self.release_inds[idx].copy()
         grasp_data = self.grasp_data[idx].copy()
 
-        # --- Apply TP-augmentation if enabled (training only) ---
+        # --- Apply augmentation if enabled (training only) ---
         if self.augment:
-            task_ind = torch.argmax(self.action_tags[idx]).item()
-            transforms = self.transforms_all_actions[f"action_{task_ind}"]
-            labels = self.labels_all_actions[f"action_{task_ind}"]
-            covs = self.covs_all_actions[f"action_{task_ind}"]
-            
-            # Get initial object poses from both cameras (zed + wrist)
-            init_obj_pose_all = []
-            for i in range(obj_data.shape[1]):
-                init_obj_pose_all.append(get_init_obj_pose(obj_data[:, i, :], cam="both"))
-            
-            # Apply augmentation to trajectory and object poses
-            traj_data_new, init_obj_pose_all_transformed = augment(
-                traj_data,
-                init_obj_pose_all,
-                transforms,
-                labels,
-                covs,
-                self.obj_tags,
-                traj_obj_ind=self.traj_obj_ind,
-            )
-            
-            # For the trajectory object, override with actual trajectory poses at capture times
-            if self.traj_obj_ind is not None:
-                for i in range(init_obj_pose_all_transformed[self.traj_obj_ind].shape[0]):
-                    ind = img_inds[i]
-                    init_obj_pose_all_transformed[self.traj_obj_ind][i, :7] = traj_data[ind][:7]
-            
-            # Update object data with augmented initial poses
-            for i, init_obj_pose_transformed in enumerate(init_obj_pose_all_transformed):
-                obj_data_filled[0, i] = init_obj_pose_transformed[0]  # Zed camera detection
-                if len(init_obj_pose_transformed) == 2:
-                    # Wrist camera detection: find first non-NaN and update
-                    first_detection_ind = np.where(~np.isnan(obj_data[1:, i, :]).any(axis=1))[0][0] + 1
-                    obj_data_filled[first_detection_ind, i] = init_obj_pose_transformed[1]
-            
-            # Propagate trajectory displacement to moving objects
-            obj_moving_action = self.obj_moving[task_ind]
-            for i, j in zip(*np.where(obj_moving_action)):
-                displacement = traj_data_new[img_inds[i], :3] - traj_data[img_inds[i], :3]
-                obj_data_filled[i, j, :3] += displacement
+            if self.augmentation_method == "random":
+                # --- Random rotation augmentation ---
+                # Collect initial object poses from both cameras
+                init_obj_pose_all = []
+                for i in range(obj_data.shape[1]):
+                    init_obj_pose_all.append(get_init_obj_pose(obj_data[:, i, :], cam="both"))
+                
+                # Apply random rotation to trajectory + object poses jointly
+                traj_data_new, init_obj_pose_all_transformed = augment_random_rotation(
+                    traj_data,
+                    init_obj_pose_all,
+                )
+                
+                # Update object data with augmented initial poses
+                for i, init_obj_pose_transformed in enumerate(init_obj_pose_all_transformed):
+                    obj_data_filled[0, i] = init_obj_pose_transformed[0]
+                    if len(init_obj_pose_transformed) == 2:
+                        first_detection_ind = np.where(~np.isnan(obj_data[1:, i, :]).any(axis=1))[0][0] + 1
+                        obj_data_filled[first_detection_ind, i] = init_obj_pose_transformed[1]
+            else:
+                # --- TP-augmentation (default) ---
+                task_ind = torch.argmax(self.action_tags[idx]).item()
+                transforms = self.transforms_all_actions[f"action_{task_ind}"]
+                labels = self.labels_all_actions[f"action_{task_ind}"]
+                covs = self.covs_all_actions[f"action_{task_ind}"]
+                
+                # Get initial object poses from both cameras (zed + wrist)
+                init_obj_pose_all = []
+                for i in range(obj_data.shape[1]):
+                    init_obj_pose_all.append(get_init_obj_pose(obj_data[:, i, :], cam="both"))
+                
+                # Apply augmentation to trajectory and object poses
+                traj_data_new, init_obj_pose_all_transformed = augment(
+                    traj_data,
+                    init_obj_pose_all,
+                    transforms,
+                    labels,
+                    covs,
+                    self.obj_tags,
+                    traj_obj_ind=self.traj_obj_ind,
+                )
+                
+                # For the trajectory object, override with actual trajectory poses at capture times
+                if self.traj_obj_ind is not None:
+                    for i in range(init_obj_pose_all_transformed[self.traj_obj_ind].shape[0]):
+                        ind = img_inds[i]
+                        init_obj_pose_all_transformed[self.traj_obj_ind][i, :7] = traj_data[ind][:7]
+                
+                # Update object data with augmented initial poses
+                for i, init_obj_pose_transformed in enumerate(init_obj_pose_all_transformed):
+                    obj_data_filled[0, i] = init_obj_pose_transformed[0]  # Zed camera detection
+                    if len(init_obj_pose_transformed) == 2:
+                        # Wrist camera detection: find first non-NaN and update
+                        first_detection_ind = np.where(~np.isnan(obj_data[1:, i, :]).any(axis=1))[0][0] + 1
+                        obj_data_filled[first_detection_ind, i] = init_obj_pose_transformed[1]
+                
+                # Propagate trajectory displacement to moving objects
+                obj_moving_action = self.obj_moving[task_ind]
+                for i, j in zip(*np.where(obj_moving_action)):
+                    displacement = traj_data_new[img_inds[i], :3] - traj_data[img_inds[i], :3]
+                    obj_data_filled[i, j, :3] += displacement
 
         # --- Post-processing ---
         # Fill any remaining NaNs in object data (forward-fill + zero-fill)

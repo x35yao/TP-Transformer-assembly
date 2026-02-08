@@ -310,3 +310,86 @@ def augment(
     traj[high_cov_mask, :3] = mus_mean_filtered[high_cov_mask]
     
     return traj, obj_poses
+
+
+# ---------------------------------------------------------------------------
+# Random Rotation Augmentation (alternative to TP-augmentation)
+# ---------------------------------------------------------------------------
+
+def random_rotation(x: np.ndarray, axis: str = "x") -> np.ndarray:
+    """Apply a random rotation to pose data around the given axis.
+    
+    Picks a random rotation angle (0-360 degrees) and a random point from the
+    data as the center of rotation. All positions and orientations are rotated
+    together around this center point.
+    
+    Unlike TP-augmentation, this does NOT use variance-based frame selection --
+    it applies the SAME rotation to ALL points uniformly.
+    
+    Args:
+        x: Pose data of shape (N, D) where D >= 7 [pos(3), quat(4), ...]
+        axis: Rotation axis ('x', 'y', or 'z')
+    
+    Returns:
+        Rotated pose data of same shape
+    """
+    new_x = x.copy()
+    degree = random.randrange(0, 360)
+    idx = random.randrange(0, x.shape[0])
+    rot = R.from_euler(axis, degree, degrees=True)
+    H = np.zeros([4, 4])
+    H[:3, :3] = rot.as_matrix()
+    # Center at a random point, rotate, then restore
+    rand_pt = x[idx, :3].copy()
+    new_x[:, :3] = new_x[:, :3] - rand_pt
+    new_x[:, :7] = lintrans(new_x[:, :7], H)
+    new_x[:, :3] = new_x[:, :3] + rand_pt
+    return new_x
+
+
+def augment_random_rotation(
+    traj_data: np.ndarray,
+    obj_pose_data: List[np.ndarray],
+    axis: str = "z",
+) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """Apply random rotation augmentation to trajectory and object poses.
+    
+    Concatenates object poses and trajectory into a single array, applies
+    a uniform random rotation to all of them together (maintaining spatial
+    relationships), then splits them back.
+    
+    This is a simpler alternative to TP-augmentation that doesn't use
+    variance-based frame selection.
+    
+    Args:
+        traj_data: Trajectory data (T, D) with [pos(3), quat(4), ...]
+        obj_pose_data: List of object pose arrays, one per object
+        axis: Rotation axis ('x', 'y', or 'z')
+    
+    Returns:
+        (augmented_trajectory, augmented_object_poses)
+    """
+    traj = traj_data.copy()
+    obj_poses = [p.copy() for p in obj_pose_data]
+    
+    # Build a single array: stack all object initial poses + trajectory
+    # We only rotate the first detection of each object (used as encoder input)
+    obj_first_poses = np.array([op[0, :7] for op in obj_poses])  # (n_objs, 7)
+    
+    # Concatenate object poses and trajectory for joint rotation
+    combined = np.concatenate([obj_first_poses, traj[:, :7]], axis=0)
+    rotated = random_rotation(combined, axis=axis)
+    
+    # Split back
+    n_objs = len(obj_poses)
+    rotated_obj_poses = rotated[:n_objs]
+    rotated_traj = rotated[n_objs:]
+    
+    # Update trajectory pose columns
+    traj[:, :7] = rotated_traj
+    
+    # Update object poses (first detection only)
+    for i in range(n_objs):
+        obj_poses[i][0, :7] = rotated_obj_poses[i]
+    
+    return traj, obj_poses

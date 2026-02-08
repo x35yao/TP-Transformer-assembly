@@ -45,5 +45,6 @@ class TrainConfig:
     action_weight: float = 100.0  # Weight for action classification loss
 
     # --- Augmentation ---
+    augmentation_method: str = "tp"  # Augmentation method: "tp" (task-parameterized) or "random" (random rotation)
     aug_date: str = "2025-02-17"  # Date folder for pre-computed augmentation data (augmentation/<date>/)
     traj_obj_ind: int = 4  # Index of the "trajectory" object in the object list (used to skip augmenting self)

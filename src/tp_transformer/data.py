@@ -291,7 +291,11 @@ def build_datasets(config: TrainConfig):
     test["traj_pose"] = list(map(norm_func, test["traj_pose"]))
     
     # Load augmentation transforms and frame selection labels
-    transforms_all_actions, labels_all_actions, covs_all_actions = load_augmentation(config)
+    # Only needed for TP augmentation; random rotation doesn't use these
+    if config.augmentation_method == "tp":
+        transforms_all_actions, labels_all_actions, covs_all_actions = load_augmentation(config)
+    else:
+        transforms_all_actions, labels_all_actions, covs_all_actions = None, None, None
     
     # Training dataset: augmentation enabled
     training_data = TrajectoryDataset(
@@ -313,6 +317,7 @@ def build_datasets(config: TrainConfig):
         covs_all_actions=covs_all_actions,
         augment_data=True,
         traj_obj_ind=config.traj_obj_ind,
+        augmentation_method=config.augmentation_method,
     )
     
     # Validation dataset: no augmentation

@@ -14,7 +14,7 @@ class TrainConfig:
     # --- Data paths ---
     path_config_file: str = "./data/task_config.yaml"  # YAML file defining task structure
     raw_dir: str = "./data/raw"  # Directory with raw demonstration recordings
-    processed_dir: str = "./data/processed_2025-02-17"  # Directory with preprocessed demo data
+    processed_dir: str = "./data/processed"  # Directory with preprocessed demo data (shared with baselines/)
     tasks: List[str] = field(default_factory=lambda: ["action_0", "action_1", "action_2"])  # Task/action names to train on
     all_objs: List[str] = field(default_factory=lambda: ["bolt", "nut", "bin", "jig"])  # Object names in the scene
 

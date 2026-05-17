@@ -11,6 +11,28 @@ venv/
 # Checkpoints (large files, generated during training)
 transformer/
 
+# Baselines (CNEP/CNMP) - large data + checkpoints, kept on local disk only
+baselines/data/*.pickle
+baselines/data/*.pickle.bak
+baselines/cnep/outputs/
+baselines/cnmp/outputs/
+# Prediction pickles are small (~90 KB) and useful as reference; keep them tracked.
+
+# Shared source data lives at the repo root in `data/` (consumed by BOTH the
+# TP-Transformer pipeline and the baseline dataset builder).
+#
+# `data/processed/` (~6.5 MB of small CSVs/H5s + action_summary.pickle) is
+# committed so the teammate gets it on `git clone`.
+#
+# `data/raw/cnep_action_*/` is the full 2 GB demo bundle (every stereo frame +
+# raw trajectory CSV). We commit ONLY the first-frame `0_left.png` per demo
+# (~143 MB, 88 files) so the teammate can see what each scene looks like and
+# can run `prepare_baseline_dataset.py` end-to-end. Everything else under
+# `cnep_action_*/<demo>/` (other PNGs, the raw CSV) is ignored and lives on
+# the lab shared drive only.
+data/raw/cnep_action_*/*/*
+!data/raw/cnep_action_*/*/0_left.png
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb

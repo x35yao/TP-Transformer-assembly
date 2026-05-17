@@ -4,5 +4,7 @@ pyyaml
 scipy
 matplotlib
 torch
+torchvision
+pillow
 h5py
 tables

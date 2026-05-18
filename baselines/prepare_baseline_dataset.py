@@ -1,4 +1,4 @@
-"""Build `baseline_dataset.pickle` consumed by the CNEP / CNMP baselines.
+"""Build packaged baseline pickles consumed by the CNEP / CNMP baselines.
 
 Port of `D:\\project\\assembly\\split_data_assembly.ipynb` (cell 12 -- the only
 cell that actually writes the baseline dataset). The notebook is ~12 cells of
@@ -57,7 +57,13 @@ The `data/` directory is shared with the TP-Transformer pipeline
 trajectories and object poses.
 
 Output:
-    --out             baselines/data/baseline_dataset.pickle
+    --out             If omitted, derived from the split definition:
+                      * With ``--splits data/splits/<stem>.yaml`` →
+                        ``baselines/data/baseline_dataset_<stem>.pickle``
+                        (e.g. ``n15_v3t3.yaml`` → ``baseline_dataset_n15_v3t3.pickle``).
+                      * Inline / legacy mode (no ``--splits``) →
+                        ``baselines/data/baseline_dataset_legacy_inline.pickle``.
+
         Dict shaped:
             {
                 'action_0': [split_seed_0, split_seed_1, split_seed_2],
@@ -80,7 +86,7 @@ import pickle
 import random
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -95,7 +101,8 @@ REPO_ROOT = HERE.parent
 DEFAULT_RAW_DIR = REPO_ROOT / "data" / "raw"
 DEFAULT_PROCESSED_DIR = REPO_ROOT / "data" / "processed"
 DEFAULT_TASK_CONFIG = REPO_ROOT / "data" / "task_config.yaml"
-DEFAULT_OUT = HERE / "data" / "baseline_dataset.pickle"
+# Default --out is resolved in main(): see _default_out_path().
+BASELINE_DATA_DIR = HERE / "data"
 
 # Notebook-pinned constants. These come straight from
 # `split_data_assembly.ipynb` cell 12 and are *not* CLI-exposed because
@@ -388,21 +395,23 @@ def _per_frame_local_traj(
     return np.array(out)  # (n_train, T, 8)
 
 
-def _frame_HT_for_test(test_obj_poses: np.ndarray, obj_idx: int, is_traj_frame: bool) -> np.ndarray:
-    if is_traj_frame:
-        return homogeneous_transform(np.eye(3), np.zeros(3))
-    obj_pose = get_init_obj_pose(test_obj_poses[:, obj_idx, :7]).copy()
-    rotmat = R.from_quat(obj_pose[3:]).as_matrix()
-    return homogeneous_transform(rotmat, obj_pose[:3])
+def _frame_HTs_per_demo(eval_obj_poses: np.ndarray, obj_idx: int, is_traj_frame: bool) -> List[np.ndarray]:
+    """Per-demo (4, 4) homogeneous transform for one reference frame.
 
+    `eval_obj_poses` is shape (N_demos, N_images, N_objects+1, 7); we extract
+    the initial pose for `obj_idx` in each demo. For the trajectory frame
+    (`is_traj_frame=True`) the transform is the identity.
 
-def _frame_HTs_for_valid(valid_obj_poses: np.ndarray, obj_idx: int, is_traj_frame: bool) -> List[np.ndarray]:
-    HTs = []
-    for mm in range(valid_obj_poses.shape[0]):
+    Returns a list of length N_demos, each entry a (4, 4) numpy array. Used
+    for both validation and test demos (the test buckets just have N_demos
+    that varies per (action, seed) under --half-split).
+    """
+    HTs: List[np.ndarray] = []
+    for mm in range(eval_obj_poses.shape[0]):
         if is_traj_frame:
             HTs.append(homogeneous_transform(np.eye(3), np.zeros(3)))
         else:
-            obj_pose = get_init_obj_pose(valid_obj_poses[mm, :, obj_idx, :7]).copy()
+            obj_pose = get_init_obj_pose(eval_obj_poses[mm, :, obj_idx, :7]).copy()
             rotmat = R.from_quat(obj_pose[3:]).as_matrix()
             HTs.append(homogeneous_transform(rotmat, obj_pose[:3]))
     return HTs
@@ -446,6 +455,12 @@ def _pack_one_split(
     """
     n_train = len(train_demos)
     n_valid = len(valid_demos)
+    n_test = len(test_demos)
+    if n_test == 0:
+        raise ValueError(
+            f"action={action} seed={seed}: zero test demos after splitting. "
+            f"Increase the eligible pool or shrink --num-train."
+        )
     n_objs_with_traj = len(all_objs) + 1  # +1 for the 'trajectory' frame
     traj_obj_ind = n_objs_with_traj - 1
 
@@ -455,7 +470,7 @@ def _pack_one_split(
 
     raw_train_objs = np.array([demo_dataset[d]["obj_pose_all"] for d in train_demos])
     raw_valid_objs = np.array([demo_dataset[d]["obj_pose_all"] for d in valid_demos])
-    raw_test_objs = np.array(demo_dataset[test_demos[0]]["obj_pose_all"])
+    raw_test_objs = np.array([demo_dataset[d]["obj_pose_all"] for d in test_demos])
 
     norm_train_trajs = np.array([
         _apply_xyz_normalisation(t, train_mean, train_std) for t in raw_train_trajs
@@ -463,7 +478,9 @@ def _pack_one_split(
     norm_valid_trajs = np.array([
         _apply_xyz_normalisation(t, train_mean, train_std) for t in raw_valid_trajs
     ])
-    norm_test_traj = _apply_xyz_normalisation(raw_test_trajs[0], train_mean, train_std)
+    norm_test_trajs = np.array([
+        _apply_xyz_normalisation(t, train_mean, train_std) for t in raw_test_trajs
+    ])
 
     norm_train_objs = _apply_xyz_normalisation(raw_train_objs, train_mean, train_std)
     norm_valid_objs = _apply_xyz_normalisation(raw_valid_objs, train_mean, train_std)
@@ -473,11 +490,11 @@ def _pack_one_split(
     traj_len = norm_train_trajs.shape[1]
     train_global = norm_train_trajs[:, :, :7]
     valid_global = norm_valid_trajs[:, :, :7]
-    test_global = norm_test_traj[:, :7]
+    test_global = norm_test_trajs[:, :, :7]
     traj_all = torch.from_numpy(np.concatenate([
         train_global,
         valid_global,
-        test_global[None],
+        test_global,
     ]))
     minmax7 = torch.zeros(7, 2)
     for k in range(7):
@@ -487,7 +504,7 @@ def _pack_one_split(
         minmax7[k] = torch.tensor([lo, hi], dtype=torch.float32)
     train_traj_global_cnep = traj_all[:n_train]
     valid_traj_global_cnep = traj_all[n_train: n_train + n_valid]
-    test_traj_global_cnep = traj_all[-1]
+    test_traj_global_cnep = traj_all[n_train + n_valid:]
 
     # ---- TP-GMM / TP-PMP: re-express train trajs in 5 reference frames ----
     times_col = (np.arange(traj_len) / traj_len).reshape(-1, 1)
@@ -503,11 +520,12 @@ def _pack_one_split(
         train_data_in_all_rfs_tp_gmm.append(per_frame_train.reshape(-1, 1 + 7))  # (n_train*T, 8)
         train_data_in_all_rfs_tp_pmp.append(per_frame_train[:, :, 1:])           # (n_train, T, 7)
 
-        test_HTs.append(_frame_HT_for_test(norm_test_objs, jj, is_traj_frame))
-        validation_HTs.append(_frame_HTs_for_valid(norm_valid_objs, jj, is_traj_frame))
+        test_HTs.append(_frame_HTs_per_demo(norm_test_objs, jj, is_traj_frame))
+        validation_HTs.append(_frame_HTs_per_demo(norm_valid_objs, jj, is_traj_frame))
 
-    # validation_HTs is list[5] of list[n_valid] -> stack to (n_valid, 5, 4, 4)
+    # Both HT bundles are list[5] of list[N_demos] -> stack to (N_demos, 5, 4, 4).
     validation_HTs_arr = np.array(validation_HTs).swapaxes(0, 1)
+    test_HTs_arr = np.array(test_HTs).swapaxes(0, 1)
     # tp_pmp concat across frame axis -> (n_train, T, 5*7=35)
     train_data_in_all_rfs_tp_pmp = np.concatenate(train_data_in_all_rfs_tp_pmp, axis=2)
 
@@ -517,24 +535,31 @@ def _pack_one_split(
         "train_traj_tp_gmm": train_data_in_all_rfs_tp_gmm,
         "train_traj_tp_pmp": train_data_in_all_rfs_tp_pmp,
         "test_t": times_col.flatten(),
-        "HTs_test": test_HTs,
-        "HTs_validation": validation_HTs_arr,
-        "test_traj_global": norm_test_traj[:, :7],
-        "validation_traj_global": valid_global,
+        "HTs_test": test_HTs_arr,                  # (n_test, 5, 4, 4)
+        "HTs_validation": validation_HTs_arr,      # (n_valid, 5, 4, 4)
+        "test_traj_global": test_global,           # (n_test, T, 7)
+        "validation_traj_global": valid_global,    # (n_valid, T, 7)
         "seed": int(seed),
         "train_stat": {"mean": train_mean, "std": np.float64(train_std)},
         "train_times_tp_pmp": train_times_tp_pmp,
         "train_feats": feats_train,
         "valid_feats": feats_valid,
-        "test_feats": feats_test,
+        "test_feats": feats_test,                  # (n_test, 1280)
         "minmax7": minmax7,
         "train_traj_global_cnep": train_traj_global_cnep,
         "valid_traj_global_cnep": valid_traj_global_cnep,
-        "test_traj_global_cnep": test_traj_global_cnep,
+        "test_traj_global_cnep": test_traj_global_cnep,  # (n_test, T, 7)
     }
 
 
 # ---------- main ----------
+
+def _default_out_path(splits: Optional[Path]) -> Path:
+    """Pickle path when ``--out`` is omitted (name tracks the split manifest)."""
+    if splits is not None:
+        return BASELINE_DATA_DIR / f"baseline_dataset_{Path(splits).stem}.pickle"
+    return BASELINE_DATA_DIR / "baseline_dataset_legacy_inline.pickle"
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -548,13 +573,25 @@ def parse_args() -> argparse.Namespace:
                    help="task_config.yaml with the `objects:` list "
                         "(default: data/task_config.yaml; if missing, "
                         "falls back to ['bin','bolt','jig','nut']).")
-    p.add_argument("--out", type=Path, default=DEFAULT_OUT,
-                   help="Output pickle path (default: baselines/data/baseline_dataset.pickle).")
+    p.add_argument("--out", type=Path, default=None,
+                   help="Output pickle. If omitted: with --splits, "
+                        "baselines/data/baseline_dataset_<yaml_stem>.pickle; "
+                        "without --splits, baselines/data/baseline_dataset_legacy_inline.pickle.")
+    p.add_argument("--splits", type=Path, default=None,
+                   help="Optional YAML manifest from prepare_splits.py. When set, "
+                        "--seeds / --actions / --num-train / --num-validation are "
+                        "read from the manifest instead of the CLI flags below. "
+                        "This is the recommended path when comparing against "
+                        "TP-Transformer (both pipelines share the same splits).")
     p.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS),
-                   help="Per-split RNG seeds. Default reproduces the canonical pickle.")
-    p.add_argument("--actions", type=str, nargs="+", default=list(DEFAULT_ACTIONS))
-    p.add_argument("--num-train", type=int, default=DEFAULT_NUM_TRAIN)
-    p.add_argument("--num-validation", type=int, default=DEFAULT_NUM_VALIDATION)
+                   help="Per-split RNG seeds. Default reproduces the canonical pickle. "
+                        "Ignored when --splits is set.")
+    p.add_argument("--actions", type=str, nargs="+", default=list(DEFAULT_ACTIONS),
+                   help="Ignored when --splits is set.")
+    p.add_argument("--num-train", type=int, default=DEFAULT_NUM_TRAIN,
+                   help="Ignored when --splits is set.")
+    p.add_argument("--num-validation", type=int, default=DEFAULT_NUM_VALIDATION,
+                   help="Ignored when --splits is set.")
     p.add_argument("--device", type=str, default=None,
                    help="torch device for MobileNetV2 (default: cpu - matches the "
                         "notebook; switch to 'cuda:0' for ~10x speedup with "
@@ -562,17 +599,82 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_splits_manifest(path: Path) -> dict:
+    """Read a manifest written by `baselines/prepare_splits.py`."""
+    with open(path, "r", encoding="utf-8") as f:
+        manifest = yaml.safe_load(f)
+    if "meta" not in manifest or "splits" not in manifest:
+        raise ValueError(f"{path} is not a valid splits manifest "
+                         f"(missing 'meta' or 'splits' key)")
+    return manifest
+
+
+def _validate_split_against_demos(
+    action: str,
+    seed: int,
+    eligible: List[str],
+    train: List[str],
+    valid: List[str],
+    test: List[str],
+) -> None:
+    """Fail loudly if the manifest references demos this builder can't load.
+
+    Most often this means the manifest was generated against a different
+    `--processed-dir` or before a demo was added to `BAD_DEMOS`.
+    """
+    eligible_set = set(eligible)
+    for bucket_name, bucket in (("train", train), ("valid", valid), ("test", test)):
+        missing = [d for d in bucket if d not in eligible_set]
+        if missing:
+            raise ValueError(
+                f"splits manifest references demos that the builder filtered out "
+                f"for action={action} seed={seed} bucket={bucket_name}: {missing}. "
+                f"Regenerate the manifest with `baselines/prepare_splits.py` against "
+                f"the same processed-dir, or update BAD_DEMOS / median_n_images."
+            )
+
+
 def main() -> None:
     args = parse_args()
+    if args.out is None:
+        args.out = _default_out_path(args.splits)
     device = args.device or "cpu"
+
+    # Resolve split configuration: --splits manifest takes precedence.
+    manifest = None
+    if args.splits is not None:
+        manifest = _load_splits_manifest(args.splits)
+        meta = manifest["meta"]
+        # CLI overrides for seeds/actions/num_train/num_validation/num_test
+        # are ignored under --splits: the manifest is the source of truth so
+        # both pipelines stay aligned. The lists in manifest["splits"] also
+        # take precedence over these scalars (we only use the scalars for
+        # logging).
+        seeds = list(meta["seeds"])
+        actions = list(meta["actions"])
+        num_train = int(meta["num_train"])
+        num_validation = int(meta.get("num_validation", -1))
+        num_test = int(meta.get("num_test", -1))
+        strategy = str(meta.get("split_strategy", "fixed"))
+    else:
+        seeds = list(args.seeds)
+        actions = list(args.actions)
+        num_train = int(args.num_train)
+        num_validation = int(args.num_validation)
+        num_test = 1
+        strategy = "inline (legacy)"
+
     print(f"raw-dir       : {args.raw_dir}")
     print(f"processed-dir : {args.processed_dir}")
     print(f"task-config   : {args.task_config}")
     print(f"out           : {args.out}")
-    print(f"seeds         : {args.seeds}")
-    print(f"actions       : {args.actions}")
-    print(f"num-train     : {args.num_train}")
-    print(f"num-validation: {args.num_validation}")
+    print(f"splits        : {args.splits or '(inline -- not using a manifest)'}")
+    print(f"strategy      : {strategy}")
+    print(f"seeds         : {seeds}")
+    print(f"actions       : {actions}")
+    print(f"num-train     : {num_train}")
+    print(f"num-validation: {num_validation}")
+    print(f"num-test      : {num_test}")
     print(f"device        : {device}")
 
     all_objs = _load_task_config(args.task_config)
@@ -581,38 +683,51 @@ def main() -> None:
     net = _build_mobilenet(device)
     img_transform = _build_img_transform()
 
-    Data_all_task: Dict[str, list] = {a: [] for a in args.actions}
+    Data_all_task: Dict[str, list] = {a: [] for a in actions}
 
     # Cache per-action demo dataset + features (independent of seed).
     per_action_demo_data: Dict[str, dict] = {}
     per_action_feats_cache: Dict[Tuple[str, str], torch.Tensor] = {}
 
-    for action in args.actions:
+    for action in actions:
         print(f"\n=== loading {action} ===")
         demos, median_traj_len = _load_demo_dataset(args.processed_dir, action, all_objs)
         print(f"  {len(demos)} valid demos, median_traj_len={median_traj_len}")
         per_action_demo_data[action] = demos
 
-    for seed in args.seeds:
+    for seed in seeds:
         # The notebook seeds Python's `random` ONCE per seed (cell 12 line 283,
         # placed OUTSIDE the per-task loop). All 3 actions share that RNG state,
         # so action_1's split depends on action_0 having consumed 2 sample calls
         # first. We replicate that here with an explicit per-seed RNG instance.
+        # When a --splits manifest is provided, this RNG is unused (we just look
+        # up the canonical split).
         rng = random.Random(seed)
 
         # Pass 1: do all splits, share the RNG across actions.
         per_action_split: Dict[str, Tuple[List[str], List[str], List[str]]] = {}
-        for action in args.actions:
+        for action in actions:
             demos = list(per_action_demo_data[action].keys())
-            per_action_split[action] = _split_demos(
-                demos, args.num_train, args.num_validation, rng,
-            )
+            if manifest is not None:
+                cell = manifest["splits"][action][seed]
+                train = list(cell["train"])
+                valid = list(cell["valid"])
+                test = list(cell["test"])
+                _validate_split_against_demos(action, seed, demos, train, valid, test)
+                per_action_split[action] = (train, valid, test)
+            else:
+                # Inline path packs a single test demo by default to preserve
+                # the legacy (notebook) shapes. Use --splits with --half-split
+                # for multi-test bundles.
+                train, valid, _ = _split_demos(demos, num_train, num_validation, rng)
+                test_pool = [d for d in demos if d not in train and d not in valid]
+                per_action_split[action] = (train, valid, test_pool[:1])
 
         # Pass 2: compute the seed-global train_mean / train_std over the
         # train trajectories from ALL actions concatenated (notebook cell 12
         # lines 361-363). All per-action `train_stat`s share this value.
         all_train_trajs: List[np.ndarray] = []
-        for action in args.actions:
+        for action in actions:
             train, _, _ = per_action_split[action]
             demo_dataset = per_action_demo_data[action]
             for d in train:
@@ -620,7 +735,7 @@ def main() -> None:
         train_mean, train_std = _normalise_train_stats(all_train_trajs)
 
         # Pass 3: pack each per-action split with the global stats and features.
-        for action in args.actions:
+        for action in actions:
             train, valid, test = per_action_split[action]
             demo_dataset = per_action_demo_data[action]
 

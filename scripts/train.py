@@ -20,13 +20,24 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         cfg.raw_dir = args.raw_dir
     if args.config_path:
         cfg.path_config_file = args.config_path
+    if args.splits:
+        cfg.splits_file = args.splits
     return cfg
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train TP-Transformer model.")
     parser.add_argument("--model-name", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="When --splits is set, this seed selects which "
+                             "(action, seed) cell in the manifest to use (so "
+                             "pass a seed that exists in the manifest).")
+    parser.add_argument("--splits", type=str, default=None,
+                        help="Optional YAML manifest from scripts/prepare_splits.py. "
+                             "When set, train/valid/test demos come from the "
+                             "manifest instead of random sampling -- this is "
+                             "how TP-Transformer stays aligned with the "
+                             "baselines for a fair head-to-head comparison.")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--total-epochs", type=int, default=None)
     parser.add_argument("--processed-dir", type=str, default=None)

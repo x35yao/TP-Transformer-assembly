@@ -5,7 +5,7 @@ feature vector alongside (time, value) observations, linearly projects it
 to 256-d, and concatenates it to every encoder/decoder input.
 
 For the assembly experiment the image feature is a pre-extracted MobileNetV2
-vector stored in `../../data/baseline_dataset.pickle`.
+vector stored in `../../data/baseline_dataset_n15_v3t3.pickle` when using the canonical split bundle.
 """
 
 from .cnmp_g import CNMP

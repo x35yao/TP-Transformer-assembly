@@ -28,6 +28,21 @@ export PYTHONPATH=<path-to-repo>/src
 python scripts/train.py
 ```
 
+To match the train / validation / test demos used when building baseline datasets (`baselines/` + [`baselines/README.md`](baselines/README.md)), generate a YAML manifest once, then pass it in and pick a `--seed` that appears in that file:
+
+```bash
+python scripts/prepare_splits.py \
+  --num-train 15 --num-validation 3 --num-test 3 \
+  --seeds 9871 9872 9873 \
+  --out data/splits/n15_v3t3.yaml
+
+python scripts/train.py --splits data/splits/n15_v3t3.yaml --seed 9871
+python scripts/train.py --splits data/splits/n15_v3t3.yaml --seed 9872
+python scripts/train.py --splits data/splits/n15_v3t3.yaml --seed 9873
+```
+
+(Omit `--splits` to use the legacy in-code random splitting instead.)
+
 ### Configuration
 
 Edit `src/tp_transformer/config.py` to modify:
@@ -55,8 +70,9 @@ TP-Transformer/
 │   ├── weights.py         # Trajectory weighting
 │   └── transformer/       # Transformer model
 ├── scripts/
-│   └── train.py           # Training entry point
-├── data/                  # Training data (not tracked)
+│   ├── train.py           # Training entry point
+│   └── prepare_splits.py # Shared split manifest for TP-Transformer + baselines
+├── data/                  # Training data (see data/splits/ for YAML manifests)
 └── EXPERIMENTS.md         # Experiment guide
 ```
 

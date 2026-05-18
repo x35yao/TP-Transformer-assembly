@@ -181,52 +181,125 @@ def load_task_data(config: TrainConfig, obj_tags: Dict[str, torch.Tensor], task_
     return task_data
 
 
+def _load_splits_manifest(path: str) -> Dict:
+    """Read a manifest written by `scripts/prepare_splits.py`."""
+    with open(path, "r", encoding="utf-8") as f:
+        manifest = yaml.safe_load(f)
+    if "meta" not in manifest or "splits" not in manifest:
+        raise ValueError(
+            f"{path} is not a valid splits manifest (missing 'meta' or 'splits' key). "
+            f"Regenerate with `python scripts/prepare_splits.py ... --out {path}`."
+        )
+    return manifest
+
+
+def _demos_for_task(
+    config: TrainConfig,
+    task: str,
+    eligible: List[str],
+    manifest: Dict,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Pick the train/valid/test demo lists for one task.
+
+    When `config.splits_file` is set, the lists come straight from the manifest
+    (keyed by `config.seed`). Otherwise we fall back to the legacy in-place
+    random sampling (preserves behaviour for runs that haven't migrated).
+
+    Cross-validation (`config.model_copies`, `config.kth_copy`) is applied
+    to the train pool in BOTH branches so existing CV sweeps keep working.
+    """
+    if manifest is not None:
+        if task not in manifest["splits"]:
+            raise KeyError(
+                f"splits manifest has no entry for task='{task}'. "
+                f"Manifest has: {sorted(manifest['splits'].keys())}"
+            )
+        per_seed = manifest["splits"][task]
+        if config.seed not in per_seed:
+            raise KeyError(
+                f"splits manifest has no entry for seed={config.seed} under "
+                f"task='{task}'. Manifest seeds: {sorted(per_seed.keys())}. "
+                f"Either pass --seed matching the manifest or regenerate."
+            )
+        cell = per_seed[config.seed]
+        train_pool = [d for d in cell["train"] if d in eligible]
+        valid_demos = [d for d in cell["valid"] if d in eligible]
+        test_demos = [d for d in cell["test"] if d in eligible]
+        # Loudly report any demos the manifest references but we couldn't load
+        # (most common cause: a demo failed the median-image-count filter here
+        # but not when the manifest was generated).
+        missing = [
+            (b, d) for b, lst in (("train", cell["train"]),
+                                  ("valid", cell["valid"]),
+                                  ("test",  cell["test"]))
+            for d in lst if d not in eligible
+        ]
+        if missing:
+            print(f"  WARNING: {task}/seed={config.seed}: dropped "
+                  f"{len(missing)} demo(s) from manifest because they aren't "
+                  f"in task_data: {missing}")
+    else:
+        train_pool = random.sample(eligible, min(config.n_train_demos, len(eligible)))
+        remaining = [d for d in eligible if d not in train_pool]
+        split_size = int(np.ceil(len(remaining) / 2))
+        valid_demos = random.sample(remaining, split_size) if remaining else []
+        test_demos = [d for d in remaining if d not in valid_demos]
+
+    # Cross-validation chunking over the train pool.
+    selected_indices = create_chunks_of_indices(
+        len(train_pool), len(train_pool), config.model_copies,
+    )[config.kth_copy]
+    train_demos = [d for i, d in enumerate(train_pool) if i in selected_indices]
+    return train_demos, valid_demos, test_demos
+
+
 def split_task_data(
     config: TrainConfig, task_data: Dict
 ) -> Tuple[Dict[str, List], Dict[str, List], Dict[str, List], List[int], List[int], List[int]]:
     """Split demonstrations into train, validation, and test sets.
-    
-    For each task:
-    1. Randomly sample n_train_demos for training
-    2. Split remaining demos 50/50 into validation and test
-    
-    Uses config.seed for reproducible splits.
-    
+
+    Two modes:
+    - `config.splits_file` is set: read the canonical splits from
+      `scripts/prepare_splits.py`'s YAML manifest. This is the mode that
+      keeps TP-Transformer aligned with the baselines for head-to-head
+      comparison.
+    - `config.splits_file` is None: legacy behaviour -- sample with
+      `random.seed(config.seed)`, then 50/50 valid/test on the remainder.
+
     Returns:
         (train, valid, test, train_splits, valid_splits, test_splits)
         Splits are cumulative start indices per task (for identifying task boundaries).
     """
-    random.seed(config.seed)
+    manifest = _load_splits_manifest(config.splits_file) if config.splits_file else None
+    if manifest is None:
+        random.seed(config.seed)
+    else:
+        meta = manifest["meta"]
+        print(f"Using splits manifest: {config.splits_file} "
+              f"(seed={config.seed}, "
+              f"num_train={meta.get('num_train', '?')}, "
+              f"num_validation={meta.get('num_validation', '?')}, "
+              f"num_test={meta.get('num_test', '?')})")
+
     train, valid, test = {}, {}, {}
     for name in ["pick_inds", "release_inds", "grasp", "objs_pose", "traj_pose", "weights", "action_tags", "img_inds", "traj_id"]:
         train[name], valid[name], test[name] = [], [], []
     train_splits, valid_splits, test_splits = [], [], []
-    
+
     for task in config.tasks:
         # Record current sizes as split boundaries
         test_splits.append(len(test["traj_pose"]))
         train_splits.append(len(train["traj_pose"]))
         valid_splits.append(len(valid["traj_pose"]))
-        
+
         demos = list(task_data[task].keys())
         if not demos:
             continue
-        
-        # Sample training demos
-        train_demos_pool = random.sample(demos, min(config.n_train_demos, len(demos)))
-        remaining = [demo for demo in demos if demo not in train_demos_pool]
-        
-        # Cross-validation support: select a subset of training demos
-        selected_indices = create_chunks_of_indices(len(train_demos_pool), len(train_demos_pool), config.model_copies)[
-            config.kth_copy
-        ]
-        train_demos = [val for i, val in enumerate(train_demos_pool) if i in selected_indices]
-        
-        # Split remaining into validation and test (50/50)
-        split_size = int(np.ceil(len(remaining) / 2))
-        valid_demos = random.sample(remaining, split_size) if remaining else []
-        test_demos = [demo for demo in remaining if demo not in valid_demos]
-        
+
+        train_demos, valid_demos, test_demos = _demos_for_task(
+            config, task, demos, manifest,
+        )
+
         # Assign each demo to its bucket
         for demo in demos:
             if demo not in task_data[task]:
@@ -236,8 +309,12 @@ def split_task_data(
                 bucket = train
             elif demo in test_demos:
                 bucket = test
-            else:
+            elif demo in valid_demos:
                 bucket = valid
+            else:
+                # Manifest-driven mode may legitimately ignore demos that
+                # aren't in any of train/valid/test.
+                continue
             bucket["pick_inds"].append(demo_data["pick_inds"])
             bucket["release_inds"].append(demo_data["release_inds"])
             bucket["grasp"].append(demo_data["grasp_traj"])
@@ -248,7 +325,7 @@ def split_task_data(
             bucket["img_inds"].append(demo_data["img_inds"])
             if bucket is train:
                 bucket["traj_id"].append(demo)
-        
+
         print(
             f"{task}\\n # Training Demos: {len(train_demos)}, # Test Demos: {len(test_demos)}, # Valid Demos: {len(valid_demos)}"
         )

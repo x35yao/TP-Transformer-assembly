@@ -6,7 +6,7 @@ as a dataclass so they can be easily modified or overridden from CLI args.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -15,12 +15,13 @@ class TrainConfig:
     path_config_file: str = "./data/task_config.yaml"  # YAML file defining task structure
     raw_dir: str = "./data/raw"  # Directory with raw demonstration recordings
     processed_dir: str = "./data/processed"  # Directory with preprocessed demo data (shared with baselines/)
+    splits_file: Optional[str] = None  # Optional path to data/splits/<name>.yaml from scripts/prepare_splits.py. When set, train/valid/test demos are read from the manifest instead of being sampled per seed; this is how TP-Transformer shares splits with the baselines for a fair comparison.
     tasks: List[str] = field(default_factory=lambda: ["action_0", "action_1", "action_2"])  # Task/action names to train on
     all_objs: List[str] = field(default_factory=lambda: ["bolt", "nut", "bin", "jig"])  # Object names in the scene
 
     # --- Model & experiment ---
     model_name: str = "default"  # Name used for checkpoint folder: transformer/<model_name>/<seed>/
-    seed: int = 9870  # Random seed for reproducibility (data splits, etc.)
+    seed: int = 9871  # RNG seed / manifest lookup (matches scripts/prepare_splits.py default seeds; use with --splits)
     max_len: int = 200  # Maximum trajectory sequence length (shorter padded, longer truncated)
     n_train_demos: int = 15  # Number of demonstrations used for training per task
     model_copies: int = 1  # Number of cross-validation folds

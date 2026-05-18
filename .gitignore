@@ -11,7 +11,7 @@ venv/
 # Checkpoints (large files, generated during training)
 transformer/
 
-# Baselines (CNEP/CNMP) - large data + checkpoints, kept on local disk only
+# Baselines (CNEP/CNMP) packaged datasets + checkpoints, kept on local disk only
 baselines/data/*.pickle
 baselines/data/*.pickle.bak
 baselines/cnep/outputs/

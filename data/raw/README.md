@@ -1,7 +1,7 @@
 # Raw CNEP demo data
 
 Source: `F:\backup\assembly\data\cnep\` — the recordings used to build
-`baselines/data/baseline_dataset.pickle` for the CNEP / CNMP baselines.
+`baselines/data/baseline_dataset_<stem>.pickle` (see `prepare_baseline_dataset.py`; canonical stem `n15_v3t3` for comparison with TP-Transformer).
 Also consumed (indirectly, via `data/processed/`) by the TP-Transformer
 pipeline in `src/tp_transformer/data.py`.
 
@@ -55,7 +55,7 @@ approach is to match trajectories by their first-frame pose:
 
 ```python
 import pickle, pandas as pd, numpy as np
-all_data = pickle.load(open('../../baselines/data/baseline_dataset.pickle','rb'))
+all_data = pickle.load(open('../../baselines/data/baseline_dataset_n15_v3t3.pickle','rb'))
 # ... compare csv[0, ['x','y','z']] against entry['train_traj_global_cnep'][i, 0, :3]
 # after un-normalising via entry['minmax7']
 ```

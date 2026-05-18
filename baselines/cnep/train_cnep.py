@@ -5,22 +5,25 @@ Key changes vs upstream:
 - All paths resolved relative to this file (no implicit CWD dependence).
 - CLI flags for action, seeds, epoch budget, number of demos, output root.
 - Removed dead MobileNetV2 model loading (image features come pre-extracted
-  from `../data/baseline_dataset.pickle`; the upstream script loaded the CNN but never used it).
+  from packaged baseline pickles under `baselines/data/`; the upstream script loaded the CNN but never used it).
 - Trains CNEP only (CNMP has its own script under `baselines/cnmp/`).
 
 Data dependency:
-    ../data/baseline_dataset.pickle  (shared with the CNMP baseline)
+    ../data/<name>.pickle  (built by ``prepare_baseline_dataset.py``, default name
+    ``baseline_dataset_n15_v3t3.pickle`` for ``data/splits/n15_v3t3.yaml``)
         - dict keyed by 'action_0' / 'action_1' / 'action_2'
         - each value: list of 3 pre-baked splits (one per seed)
-        - each entry has keys (T = 150/186/197 for action_0/1/2):
-            train_traj_global_cnep : (15, T, 7)    torch.float64  min-max normalised to [-1, 1]
-            valid_traj_global_cnep : (4,  T, 7)    torch.float64  min-max normalised to [-1, 1]
-            test_traj_global_cnep  : (T, 7)        torch.float64
-            train_feats            : (15, 1280)    torch.float32  MobileNetV2 feats
-            valid_feats            : (4,  1280)
-            test_feats             : (1,  1280)
-            minmax7                : (7, 2)        per-dim min/max for de-normalisation
-            seed                   : int           (9871/9872/9873 in the current pickle)
+        - N_train, N_valid, N_test are fixed by whichever split YAML was used
+          to build the pickle (canonical ``n15_v3t3`` → 15 / 3 / 3).
+        - each entry has keys:
+            train_traj_global_cnep : (N_train, T, 7) torch.float64  min-max normalised to [-1, 1]
+            valid_traj_global_cnep : (N_valid, T, 7) torch.float64  min-max normalised to [-1, 1]
+            test_traj_global_cnep  : (N_test , T, 7) torch.float64  (used by predict_cnep.py, not training)
+            train_feats            : (N_train, 1280) torch.float32  MobileNetV2 feats
+            valid_feats            : (N_valid, 1280)
+            test_feats             : (N_test , 1280)
+            minmax7                : (7, 2)          per-dim min/max for de-normalisation
+            seed                   : int             (9871/9872/9873 in the current pickle)
 
 Per-step input layout fed to CNEP (image-conditioned `_g` variant):
     obs      (B, n_max=1, dx+dy)   with obs[:, 0] = (t=0, pose@t=0)
@@ -49,7 +52,8 @@ if str(MODELS_DIR) not in sys.path:
 from cnep_g import CNEP
 
 
-DEFAULT_DATA = HERE.parent / "data" / "baseline_dataset.pickle"
+CANONICAL_DATASET_NAME = "baseline_dataset_n15_v3t3.pickle"
+DEFAULT_DATA = HERE.parent / "data" / CANONICAL_DATASET_NAME
 DEFAULT_OUTPUT_ROOT = HERE / "outputs"
 
 
@@ -61,15 +65,16 @@ def log_training_stats(log_message: str, log_file: Path) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train CNEP baseline on assembly data.")
     p.add_argument("--data", type=str, default=str(DEFAULT_DATA),
-                   help="Path to baseline_dataset.pickle (default: baselines/data/baseline_dataset.pickle).")
+                   help=f"Path to packaged baseline data "
+                        f"(default: baselines/data/{CANONICAL_DATASET_NAME}).")
     p.add_argument("--actions", nargs="+", default=["action_0", "action_1", "action_2"],
                    help="Which actions to train on.")
     p.add_argument("--seed-indices", nargs="+", type=int, default=[0, 1, 2],
                    help="Which seed entries to use (0/1/2 -> seeds 9871/9872/9873 in the pickle).")
     p.add_argument("--num-demos", type=int, default=15,
                    help="Number of training demos to use (max 15; for the 1-15 sweep in Experiment 2).")
-    p.add_argument("--num-valid", type=int, default=4,
-                   help="Number of validation demos to use (max 4 due to valid_feats size).")
+    p.add_argument("--num-valid", type=int, default=3,
+                   help="Number of validation demos to use (canonical n15_v3t3 pickle has 3).")
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--epochs", type=int, default=2_000_000)
     p.add_argument("--lr", type=float, default=3e-4)

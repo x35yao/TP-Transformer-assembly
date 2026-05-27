@@ -20,7 +20,8 @@ class TrainConfig:
     all_objs: List[str] = field(default_factory=lambda: ["bolt", "nut", "bin", "jig"])  # Object names in the scene
 
     # --- Model & experiment ---
-    model_name: str = "default"  # Name used for checkpoint folder: transformer/<model_name>/<seed>/
+    model_name: str = "default"  # Name used for checkpoint folder: <output_root>/<model_name>/<seed>/
+    output_root: str = "./transformer"  # Root dir for checkpoints + logs. Override to /shared/$USER/... on PCS compute nodes (which can't write to /home).
     seed: int = 9871  # RNG seed / manifest lookup (matches scripts/prepare_splits.py default seeds; use with --splits)
     max_len: int = 200  # Maximum trajectory sequence length (shorter padded, longer truncated)
     n_train_demos: int = 15  # Number of demonstrations used for training per task

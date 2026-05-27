@@ -49,3 +49,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Personal/local scratch (cluster sbatch templates + result aggregation helpers
+# that depend on PCS-specific paths; not part of the shared project).
+scripts/slurm/
+scripts/exp2_summary.py
+scripts/lr_sweep_summary.py
+
+# Local data archive (the unzipped contents under data/raw/ are what's used).
+data/raw_data.zip

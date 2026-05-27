@@ -34,10 +34,12 @@ class TrainConfig:
 
     # --- Training hyperparameters ---
     batch_size: int = 8  # Mini-batch size for training
-    learning_rate: float = 1.25e-6  # Initial learning rate for Adam optimizer
+    learning_rate: float = 1e-4  # Initial learning rate for Adam optimizer (selected via lr_sweep on TP-aug seed 9871; was 1.25e-6 with the broken per-epoch optimizer reset)
     total_epochs: int = 50000  # Total number of training epochs
     print_interval: int = 100  # Print metrics every N epochs
-    save_interval: int = 100  # Save model checkpoint every N epochs
+    save_interval: int = 100  # Save periodic model checkpoint every N epochs
+    min_lr: float = 1e-9  # Stop training when the LR scheduler floors LR at or below this value (also passed to ReduceLROnPlateau as its `min_lr`)
+    save_optimizer: bool = False  # If True, periodic checkpoints also include optimizer/scheduler state
 
     # --- Loss weights ---
     pos_weight: float = 1.0  # Weight for position loss (x, y, z)

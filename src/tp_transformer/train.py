@@ -298,11 +298,16 @@ def train_model(config: TrainConfig) -> None:
        - Train one epoch
        - Validate one epoch
        - Log metrics (every print_interval epochs)
-       - Save checkpoint (every save_interval epochs)
+       - Save periodic checkpoint (every save_interval epochs)
+       - Save best checkpoint when validation important_dist improves
        - Step LR scheduler based on validation important distance
+       - Stop if LR has been floored at min_lr (scheduler can't reduce further)
     
-    Checkpoints saved to: transformer/<model_name>/<seed>/model_<epoch>.pth
-    Training log saved to: transformer/<model_name>/<seed>/training_log.txt
+    Checkpoints saved to: <output_root>/<model_name>/<seed>/
+        model_<epoch>.pth   (periodic; weights only unless save_optimizer=True)
+        model_best.pth      (overwritten when val improves; weights only)
+        model_last.pth      (overwritten every save_interval; weights only)
+    Training log saved to: <output_root>/<model_name>/<seed>/training_log.txt
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -312,27 +317,32 @@ def train_model(config: TrainConfig) -> None:
     valid_dataloader = DataLoader(valid_data, batch_size=1, shuffle=False)
     
     # Create output directory and save normalization stats
-    os.makedirs(f"./transformer/{config.model_name}/{config.seed}", exist_ok=True)
-    with open(f"./transformer/{config.model_name}/{config.seed}/train_stat.pickle", "wb") as f:
+    folder = os.path.join(config.output_root, config.model_name, str(config.seed))
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "train_stat.pickle"), "wb") as f:
         import pickle
         pickle.dump(train_stats, f)
     
-    # Build model
+    # Build model + optimizer ONCE (outside the epoch loop) so Adam's running
+    # moments and the LR scheduler's state actually persist across epochs.
     model = build_model(config, device)
     optimizer = Adam(model.parameters(), lr=config.learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=500, factor=0.5, threshold=0.01, threshold_mode="rel")
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=500, factor=0.5, threshold=0.01, threshold_mode="rel", min_lr=config.min_lr)
     
     print(f"Cuda available: {torch.cuda.is_available()}")
     print(f"Model Parameters: {get_n_params(model)}")
+    print(f"Augmentation method: {config.augmentation_method}")
+    print(f"Total epochs (max): {config.total_epochs}, min_lr: {config.min_lr}")
     
-    folder = f"./transformer/{config.model_name}/{config.seed}"
     log_file = os.path.join(folder, "training_log.txt")
+    
+    # Best-on-validation tracking (lower important_dist = better)
+    best_v_important_dist = float("inf")
+    best_epoch = -1
+    epochs_since_improvement = 0
     
     epoch = 0
     while epoch < config.total_epochs + 1:
-        # Note: optimizer is re-created each epoch (resets momentum)
-        optimizer = Adam(model.parameters(), lr=config.learning_rate)
-        
         # --- Training ---
         t_loss, t_pos_loss, t_ori_loss, t_grasp_loss, t_action_loss, t_pick_dists, t_release_dists, t_important_dists = train_traj_epoch(
             model,
@@ -372,29 +382,77 @@ def train_model(config: TrainConfig) -> None:
         )
         
         v_loss_mean = np.mean(v_loss)
-        v_important_dists = np.mean(v_important_dists)
+        v_important_dist_mean = float(np.mean(v_important_dists))
+        
+        # --- Track best-on-validation ---
+        improved = v_important_dist_mean < best_v_important_dist
+        if improved:
+            best_v_important_dist = v_important_dist_mean
+            best_epoch = epoch
+            epochs_since_improvement = 0
+            torch.save(
+                {"epoch": epoch, "model_state_dict": model.state_dict(), "v_important_dist": best_v_important_dist},
+                os.path.join(folder, "model_best.pth"),
+            )
+        else:
+            epochs_since_improvement += 1
         
         # --- Logging ---
         if epoch % config.print_interval == 0:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            current_lr = optimizer.param_groups[0]["lr"]
             message = (
-                f"\n-------------------Time {timestamp}, Epoch {epoch}, Learning rate {scheduler.get_last_lr()}, Batch size {config.batch_size} --------------------\n"
+                f"\n-------------------Time {timestamp}, Epoch {epoch}, Learning rate [{current_lr}], Batch size {config.batch_size} --------------------\n"
                 f"Training: total loss {round(np.mean(t_loss), 3)}, pos loss {round(np.mean(t_pos_loss), 3)}, ori loss {round(np.mean(t_ori_loss), 3)}, "
                 f"grasp loss {round(np.mean(t_grasp_loss), 3)}, action loss {round(np.mean(t_action_loss), 3)}, pick dist {round(np.mean(t_pick_dists), 3)}, "
                 f"release dist {round(np.mean(t_release_dists), 3)}, important dist {round(np.mean(t_important_dists), 3)}\n"
                 f"Valid   : total loss {round(v_loss_mean, 3)}, pos loss {round(np.mean(v_pos_loss), 3)}, ori loss {round(np.mean(v_ori_loss), 3)}, "
                 f"grasp loss {round(np.mean(v_grasp_loss), 3)}, action loss {round(np.mean(v_action_loss), 3)}, grasp accuracy {round(np.mean(v_grasp_accuracies), 3)}, "
-                f"action accuracy {round(np.mean(v_action_accuracies), 3)}, pick dist {round(np.mean(v_pick_dists), 3)}, release dist {round(np.mean(v_release_dists), 3)},  important dist {round(v_important_dists, 3)}\n"
+                f"action accuracy {round(np.mean(v_action_accuracies), 3)}, pick dist {round(np.mean(v_pick_dists), 3)}, release dist {round(np.mean(v_release_dists), 3)},  important dist {round(v_important_dist_mean, 3)}\n"
+                f"Best    : epoch {best_epoch}, important dist {round(best_v_important_dist, 3)}, epochs_since_improvement {epochs_since_improvement}\n"
             )
             print(message)
             log_training_stats(message, log_file)
         
-        # --- Save checkpoint ---
+        # --- Save periodic + last checkpoint ---
         if epoch % config.save_interval == 0:
-            checkpoint = {"epoch": epoch, "model": model, "optimizer": optimizer, "scheduler": scheduler}
-            path = os.path.join(folder, f"model_{epoch}.pth")
-            torch.save(checkpoint, path)
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "v_important_dist": v_important_dist_mean,
+            }
+            if config.save_optimizer:
+                checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+                checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+            torch.save(checkpoint, os.path.join(folder, f"model_{epoch}.pth"))
+            torch.save(checkpoint, os.path.join(folder, "model_last.pth"))
         
         # Step LR scheduler based on validation important distance
-        scheduler.step(v_important_dists)
+        scheduler.step(v_important_dist_mean)
+        
+        # --- Stop when LR floors out (scheduler can't reduce further) ---
+        # Once the LR scheduler hits its `min_lr` floor, parameter updates are
+        # negligible; further epochs just burn compute without improving val.
+        current_lr = optimizer.param_groups[0]["lr"]
+        if current_lr <= config.min_lr * 1.01:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            message = (
+                f"\n[{timestamp}] LR floor reached at epoch {epoch}: "
+                f"current_lr={current_lr:g} <= min_lr={config.min_lr:g} "
+                f"(best epoch {best_epoch}, best important dist {round(best_v_important_dist, 3)}).\n"
+            )
+            print(message)
+            log_training_stats(message, log_file)
+            break
+        
         epoch += 1
+    
+    # Final summary line
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    final_msg = (
+        f"\n[{timestamp}] Training finished. "
+        f"Best epoch: {best_epoch}, best val important dist: {round(best_v_important_dist, 3)}. "
+        f"Best checkpoint: {os.path.join(folder, 'model_best.pth')}\n"
+    )
+    print(final_msg)
+    log_training_stats(final_msg, log_file)

@@ -36,6 +36,8 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         cfg.learning_rate = args.learning_rate
     if args.min_lr is not None:
         cfg.min_lr = args.min_lr
+    if args.scheduler_patience_steps is not None:
+        cfg.scheduler_patience_steps = args.scheduler_patience_steps
     if args.output_root:
         cfg.output_root = args.output_root
     return cfg
@@ -76,7 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--min-lr", type=float, default=None,
                         help="LR scheduler floor; training stops once LR "
-                             "reaches this value (default 1e-9).")
+                             "reaches this value (default 1e-7).")
+    parser.add_argument("--scheduler-patience-steps", type=int, default=None,
+                        help="LR scheduler patience in gradient-update steps "
+                             "(not epochs). Auto-scaled to epochs based on "
+                             "batches_per_epoch so the per-K optimization "
+                             "budget is fair across K (default 3000).")
     parser.add_argument("--output-root", type=str, default=None,
                         help="Root dir for checkpoints + logs "
                              "(<output_root>/<model_name>/<seed>/). "

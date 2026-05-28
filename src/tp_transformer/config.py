@@ -40,6 +40,7 @@ class TrainConfig:
     print_interval: int = 100  # Print metrics every N epochs
     save_interval: int = 100  # Save periodic model checkpoint every N epochs
     min_lr: float = 1e-7  # Stop training when the LR scheduler floors LR at or below this value (also passed to ReduceLROnPlateau as its `min_lr`). 1e-7 ≈ 10 halvings below default LR=1e-4, so a fully-stopped run has had the scheduler reduce LR 10 times with no improvement (5000 stagnant epochs) before giving up.
+    scheduler_patience_steps: int = 3000  # LR-scheduler patience expressed in gradient-update steps (not epochs). Auto-scaled to epochs as `max(1, scheduler_patience_steps // batches_per_epoch)`. With dataset_size = K*3 and batch=8 this gives K=1: 3000 epochs, K=5: 1500, K=10: 750, K=15: 500. Equalizes the per-K optimization budget so the "MSE vs K" curve is fair across K.
     save_optimizer: bool = False  # If True, periodic checkpoints also include optimizer/scheduler state
 
     # --- Loss weights ---

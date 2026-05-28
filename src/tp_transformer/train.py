@@ -316,6 +316,20 @@ def train_model(config: TrainConfig) -> None:
     train_dataloader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
     valid_dataloader = DataLoader(valid_data, batch_size=1, shuffle=False)
     
+    # Scheduler patience is configured in gradient-update steps and translated
+    # to epochs here. PyTorch's DataLoader doesn't drop the partial last batch,
+    # so batches_per_epoch is ceil(N / batch_size). At K=1 with dataset_size=3
+    # there's still 1 batch/epoch (3 samples padded into the partial batch).
+    import math
+    batches_per_epoch = max(1, math.ceil(len(train_data) / config.batch_size))
+    scheduler_patience_epochs = max(1, config.scheduler_patience_steps // batches_per_epoch)
+    print(
+        f"Train dataset: {len(train_data)} samples, batch_size={config.batch_size}, "
+        f"batches_per_epoch={batches_per_epoch}, "
+        f"scheduler_patience: {config.scheduler_patience_steps} steps -> "
+        f"{scheduler_patience_epochs} epochs"
+    )
+    
     # Create output directory and save normalization stats
     folder = os.path.join(config.output_root, config.model_name, str(config.seed))
     os.makedirs(folder, exist_ok=True)
@@ -327,7 +341,7 @@ def train_model(config: TrainConfig) -> None:
     # moments and the LR scheduler's state actually persist across epochs.
     model = build_model(config, device)
     optimizer = Adam(model.parameters(), lr=config.learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=500, factor=0.5, threshold=0.01, threshold_mode="rel", min_lr=config.min_lr)
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=scheduler_patience_epochs, factor=0.5, threshold=0.01, threshold_mode="rel", min_lr=config.min_lr)
     
     print(f"Cuda available: {torch.cuda.is_available()}")
     print(f"Model Parameters: {get_n_params(model)}")

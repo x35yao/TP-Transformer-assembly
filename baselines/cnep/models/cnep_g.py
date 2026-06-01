@@ -159,24 +159,39 @@ class CNEP(nn.Module):
         sum_masked_log_prob = masked_log_prob.sum(dim=-1).sum(dim=-1)  # (num_decoders, batch_size) - sum over tar and output_dim
 
         valid_counts = tar_mask_expanded.sum(dim=-1).sum(dim=-1)  # (num_decoders, batch_size)
-        mean_log_prob = sum_masked_log_prob / valid_counts  # (num_decoders, batch_size)
+        # Avoid 0/0 NaN for fully-masked batch slots (e.g. K < batch_size during training).
+        # We compute mean_log_prob with a safe denominator and then exclude those slots
+        # from any aggregation that contributes to gradients.
+        slot_valid = valid_counts > 0  # (num_decoders, batch_size); same value across decoders
+        safe_counts = valid_counts.clamp(min=1.0)
+        mean_log_prob = sum_masked_log_prob / safe_counts  # (num_decoders, batch_size)
 
         dec_ids = torch.argmax(gate_vals, dim=-1).unsqueeze(0)
         losses = mean_log_prob.gather(0, dec_ids)  # 0:dim, loss per individual
 
         #############
-        # Actual loss
+        # Actual loss (only over valid slots)
         weighted_nll_per_ind = torch.mul(gate_vals, mean_log_prob.T)  # (batch_size, num_decoders)
-        nll = weighted_nll_per_ind.mean()  # scalar - mean over individuals and decoders
+        # batch-slot mask, broadcast over decoders
+        valid_per_slot = slot_valid[0].unsqueeze(-1).type_as(weighted_nll_per_ind)  # (batch_size, 1)
+        nll_num = (weighted_nll_per_ind * valid_per_slot).sum()
+        nll_den = (valid_per_slot.expand_as(weighted_nll_per_ind)).sum().clamp(min=1.0)
+        nll = nll_num / nll_den  # scalar - mean over valid (individual, decoder) pairs
 
         #############
         # Overall entropy. We want to increase entropy; i.e. for a batch, the model should use all decoders not just one
-        gate_means = torch.mean(gate_vals, dim=0).squeeze(-1).squeeze(-1)
+        # Use only valid slots to compute the batch-mean gate distribution.
+        valid_slots_b = slot_valid[0].type_as(gate_vals).unsqueeze(-1)  # (batch_size, 1)
+        gate_means = (gate_vals * valid_slots_b).sum(dim=0) / valid_slots_b.sum().clamp(min=1.0)
+        gate_means = gate_means.squeeze(-1).squeeze(-1)
         batch_entropy = self.entropy(gate_means)  # scalar
 
         #############
         # Gate std: sometimes all gates are the same, we want to penalize low std; i.e we want to increase std
-        ind_entropy = self.entropy(gate_vals).mean()  # scalar
+        ind_entropy_per = self.entropy(gate_vals)  # (batch_size,)
+        ind_ent_num = (ind_entropy_per * slot_valid[0].type_as(ind_entropy_per)).sum()
+        ind_ent_den = slot_valid[0].sum().clamp(min=1).type_as(ind_entropy_per)
+        ind_entropy = ind_ent_num / ind_ent_den
 
         return self.nll_coef*nll - self.batch_entropy_coef*batch_entropy + self.ind_entropy_coef*ind_entropy, nll
 

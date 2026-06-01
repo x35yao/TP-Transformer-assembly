@@ -79,6 +79,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--val-per-epoch", type=int, default=1000)
     p.add_argument("--snapshot-per-epoch", type=int, default=100_000)
+    p.add_argument("--sampling", type=str, default="fixed", choices=["fixed", "random"],
+                   help="Training conditioning regime. 'fixed': always condition on t=0, "
+                        "predict t=1..T-1 (matches inference exactly). 'random': upstream "
+                        "CNP-style — random n in [1,n_max), m in [1,m_max) context/target "
+                        "points per step.")
+    p.add_argument("--n-max", type=int, default=20,
+                   help="Max number of context points per training example (random sampling only).")
+    p.add_argument("--m-max", type=int, default=20,
+                   help="Max number of target points per training example (random sampling only).")
     p.add_argument("--output-root", type=str, default=str(DEFAULT_OUTPUT_ROOT),
                    help="Root for run output directories: <root>/<action>/<seed>/cnmp.pt")
     p.add_argument("--device", type=str, default=None,
@@ -96,18 +105,31 @@ def train_one_split(
     seed = int(data["seed"])
     num_demos = min(args.num_demos, data["train_traj_global_cnep"].shape[0])
     v_num_demos = min(args.num_valid, data["valid_feats"].shape[0])
-    batch_size = args.batch_size
+    # Avoid creating fully-padded batch slots when num_demos < batch_size:
+    # those slots produce 0/0 NaN in the masked NLL. Clamp batch_size to
+    # num_demos in the low-K regime. Validation reuses the same batch_size
+    # and pads via repeated last-id (n_real excludes padded slots from metric).
+    batch_size = max(1, min(args.batch_size, num_demos))
 
-    train_trajs = data["train_traj_global_cnep"][:num_demos]
-    val_trajs = data["valid_traj_global_cnep"][:v_num_demos]
-    train_feats = data["train_feats"][:num_demos]
-    val_feats = data["valid_feats"][:v_num_demos]
+    # Move all training tensors to device once (avoids per-step host->device copies).
+    train_trajs = data["train_traj_global_cnep"][:num_demos].to(device, dtype=torch.float32)
+    val_trajs = data["valid_traj_global_cnep"][:v_num_demos].to(device, dtype=torch.float32)
+    train_feats = data["train_feats"][:num_demos].to(device, dtype=torch.float32)
+    val_feats = data["valid_feats"][:v_num_demos].to(device, dtype=torch.float32)
 
     t_steps = train_trajs.shape[1]
     dy = train_trajs.shape[-1]
     dx, dg, dims = 1, 256, train_feats.shape[-1]
-    n_max = 1
-    m_max = t_steps - 1
+
+    # Training buffer sizes depend on the sampling regime.
+    if args.sampling == "fixed":
+        n_max = 1
+        m_max = t_steps - 1
+    else:
+        n_max = args.n_max
+        m_max = args.m_max
+        if n_max < 2 or m_max < 2:
+            raise ValueError("--n-max and --m-max must each be >= 2 for random sampling")
 
     obs = torch.zeros((batch_size, n_max, dx + dy), device=device)
     tar_x = torch.zeros((batch_size, m_max, dx), device=device)
@@ -116,15 +138,22 @@ def train_one_split(
     tar_mask = torch.zeros((batch_size, m_max), dtype=torch.bool, device=device)
     img_in = torch.zeros((batch_size, dims), device=device)
 
-    val_obs = torch.zeros((batch_size, n_max, dx + dy), device=device)
-    val_tar_x = torch.zeros((batch_size, m_max, dx), device=device)
-    val_tar_y = torch.zeros((batch_size, m_max, dy), device=device)
-    val_obs_mask = torch.zeros((batch_size, n_max), dtype=torch.bool, device=device)
+    # Validation always uses inference-time conditioning: 1 context point at t=0,
+    # all of t=1..T-1 as targets. The model's encoder uses self.n_max for the
+    # img-feature expand, so val_obs is allocated with the model's training n_max
+    # (only slot 0 carries data; remaining slots stay masked out).
+    val_n_max = n_max
+    val_m_max = t_steps - 1
+    val_obs = torch.zeros((batch_size, val_n_max, dx + dy), device=device)
+    val_tar_x = torch.zeros((batch_size, val_m_max, dx), device=device)
+    val_tar_y = torch.zeros((batch_size, val_m_max, dy), device=device)
+    val_obs_mask = torch.zeros((batch_size, val_n_max), dtype=torch.bool, device=device)
     val_img_in = torch.zeros((batch_size, dims), device=device)
 
-    m_ids_full = torch.arange(1, t_steps)
+    m_ids_full = torch.arange(1, t_steps, device=device)
 
-    def prepare_masked_batch(traj_ids):
+    def prepare_masked_batch_fixed(traj_ids):
+        """Always: obs = (t=0, pose@t=0); targets = all of t=1..T-1."""
         obs.zero_(); tar_x.zero_(); tar_y.zero_()
         obs_mask.zero_(); tar_mask.zero_(); img_in.zero_()
         for i, traj_id in enumerate(traj_ids):
@@ -136,6 +165,31 @@ def train_one_split(
             tar_x[i, :, :dx] = (m_ids_full.float() / t_steps).unsqueeze(1)
             tar_y[i] = traj[m_ids_full]
             tar_mask[i] = True
+
+    def prepare_masked_batch_random(traj_ids):
+        """Upstream CNP-style: random n context points, random m target points (disjoint)."""
+        obs.zero_(); tar_x.zero_(); tar_y.zero_()
+        obs_mask.zero_(); tar_mask.zero_(); img_in.zero_()
+        for i, traj_id in enumerate(traj_ids):
+            traj = train_trajs[traj_id]
+            n = int(torch.randint(1, n_max, (1,)).item())
+            m = int(torch.randint(1, m_max, (1,)).item())
+            permuted_ids = torch.randperm(t_steps, device=device)
+            n_ids = permuted_ids[:n]
+            m_ids = permuted_ids[n : n + m]
+
+            obs[i, :n, :dx] = (n_ids.float() / t_steps).unsqueeze(1)
+            obs[i, :n, dx:] = traj[n_ids]
+            obs_mask[i, :n] = True
+            img_in[i] = train_feats[traj_id]
+
+            tar_x[i, :m, :dx] = (m_ids.float() / t_steps).unsqueeze(1)
+            tar_y[i, :m] = traj[m_ids]
+            tar_mask[i, :m] = True
+
+    prepare_masked_batch = (
+        prepare_masked_batch_fixed if args.sampling == "fixed" else prepare_masked_batch_random
+    )
 
     def prepare_masked_val_batch(traj_ids):
         val_obs.zero_(); val_tar_x.zero_(); val_tar_y.zero_()

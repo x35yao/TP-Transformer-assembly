@@ -127,5 +127,10 @@ class CNMP(nn.Module):
         sum_masked_log_prob = masked_log_prob.sum(dim=-1).sum(dim=-1)  # (batch_size) - sum over tar and output_dim
 
         valid_counts = tar_mask_expanded.sum(dim=-1).sum(dim=-1)  # (batch_size)
-        mean_log_probs = sum_masked_log_prob / valid_counts  # (batch_size)
-        return mean_log_probs.mean()
+        # Avoid 0/0 NaN for fully-masked batch slots (e.g. K < batch_size during training).
+        slot_valid = valid_counts > 0  # (batch_size,)
+        safe_counts = valid_counts.clamp(min=1.0)
+        mean_log_probs = sum_masked_log_prob / safe_counts  # (batch_size)
+        # Mean over valid slots only.
+        valid_f = slot_valid.type_as(mean_log_probs)
+        return (mean_log_probs * valid_f).sum() / valid_f.sum().clamp(min=1.0)

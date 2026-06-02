@@ -374,7 +374,8 @@ def build_datasets(config: TrainConfig):
     else:
         transforms_all_actions, labels_all_actions, covs_all_actions = None, None, None
     
-    # Training dataset: augmentation enabled
+    # Training dataset: augmentation enabled (unless method == "none")
+    augment_train = config.augmentation_method != "none"
     training_data = TrajectoryDataset(
         train["objs_pose"],
         train["traj_pose"],
@@ -392,7 +393,7 @@ def build_datasets(config: TrainConfig):
         transforms_all_actions=transforms_all_actions,
         labels_all_actions=labels_all_actions,
         covs_all_actions=covs_all_actions,
-        augment_data=True,
+        augment_data=augment_train,
         traj_obj_ind=config.traj_obj_ind,
         augmentation_method=config.augmentation_method,
     )

@@ -62,9 +62,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-dir", type=str, default=None)
     parser.add_argument("--config-path", type=str, default=None)
     parser.add_argument("--augmentation-method", type=str, default=None,
-                        choices=["tp", "random"],
-                        help="Augmentation method: 'tp' (task-parameterized) or "
-                             "'random' (random rotation). Used for Experiment 1.")
+                        choices=["tp", "random", "none"],
+                        help="Augmentation method: 'tp' (task-parameterized), "
+                             "'random' (random rotation), or 'none' (no augmentation; "
+                             "train on the raw K demos). Used for Experiment 2.")
     parser.add_argument("--aug-date", type=str, default=None,
                         help="Date folder under augmentation/<date>/ "
                              "(only relevant when --augmentation-method=tp).")

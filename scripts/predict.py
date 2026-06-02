@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-dir", type=str, default=None)
     parser.add_argument("--config-path", type=str, default=None)
     parser.add_argument("--augmentation-method", type=str, default=None,
-                        choices=["tp", "random"],
+                        choices=["tp", "random", "none"],
                         help="Must match the augmentation method used at "
                              "training time so the model's expected input "
                              "shape matches.")

@@ -48,6 +48,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--actions", nargs="+", default=["action_0", "action_1", "action_2"])
     p.add_argument("--seed-indices", nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--num-decoders", type=int, default=2)
+    p.add_argument("--encoder-dims", type=int, nargs="+", default=[256, 256],
+                   help="Must match the dims the checkpoint was trained with.")
+    p.add_argument("--decoder-dims", type=int, nargs="+", default=[128, 128],
+                   help="Must match the dims the checkpoint was trained with.")
     p.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
     p.add_argument("--out-suffix", type=str, default="",
                    help="Optional suffix for prediction filename, e.g. '_resaved'.")
@@ -93,8 +97,8 @@ def predict_one_split(
     batch_size = 1
 
     cnep = CNEP(
-        dx + dg, dy, n_max, m_max, [512, 512],
-        num_decoders=args.num_decoders, decoder_hidden_dims=[512, 512],
+        dx + dg, dy, n_max, m_max, list(args.encoder_dims),
+        num_decoders=args.num_decoders, decoder_hidden_dims=list(args.decoder_dims),
         batch_size=batch_size, scale_coefs=True, device=device,
     )
     ckpt = Path(args.output_root) / action / str(seed) / "cnep.pt"

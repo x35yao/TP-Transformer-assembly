@@ -47,6 +47,10 @@ def parse_args() -> argparse.Namespace:
                    help="Where to find <action>/<seed>/cnmp.pt")
     p.add_argument("--actions", nargs="+", default=["action_0", "action_1", "action_2"])
     p.add_argument("--seed-indices", nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--encoder-dims", type=int, nargs="+", default=[256, 256],
+                   help="Must match the dims the checkpoint was trained with.")
+    p.add_argument("--decoder-dims", type=int, nargs="+", default=[256, 256],
+                   help="Must match the dims the checkpoint was trained with.")
     p.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
     p.add_argument("--out-suffix", type=str, default="")
     p.add_argument("--device", type=str, default="cpu")
@@ -90,8 +94,8 @@ def predict_one_split(
     batch_size = 1
 
     cnmp = CNMP(
-        dx + dg, dy, n_max, m_max, [512, 512],
-        decoder_hidden_dims=[512, 512], batch_size=batch_size, device=device,
+        dx + dg, dy, n_max, m_max, list(args.encoder_dims),
+        decoder_hidden_dims=list(args.decoder_dims), batch_size=batch_size, device=device,
     )
     ckpt = Path(args.output_root) / action / str(seed) / "cnmp.pt"
     cnmp.load_state_dict(torch.load(ckpt, map_location=device))

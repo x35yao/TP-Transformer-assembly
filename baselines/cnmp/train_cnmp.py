@@ -75,8 +75,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-valid", type=int, default=3,
                    help="Number of validation demos to use (canonical n15_v3t3 pickle has 3).")
     p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--epochs", type=int, default=2_000_000)
+    p.add_argument("--epochs", type=int, default=5_000_000)
+    p.add_argument("--patience-epochs", type=int, default=50_000,
+                   help="Stop if validation MSE has not improved in this many epochs. "
+                        "Set to 0 to disable early stopping (matches upstream behaviour).")
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--encoder-dims", type=int, nargs="+", default=[256, 256],
+                   help="Encoder hidden layer dims. Default [256,256] matches the upstream "
+                        "MobileNet reference script (train_cnep_with_mobilenet_v2.py).")
+    p.add_argument("--decoder-dims", type=int, nargs="+", default=[256, 256],
+                   help="Decoder hidden layer dims. Default [256,256] matches the upstream "
+                        "MobileNet reference script.")
     p.add_argument("--val-per-epoch", type=int, default=1000)
     p.add_argument("--snapshot-per-epoch", type=int, default=100_000)
     p.add_argument("--sampling", type=str, default="fixed", choices=["fixed", "random"],
@@ -204,8 +213,8 @@ def train_one_split(
             val_tar_y[i] = traj[m_ids_full]
 
     cnmp_ = CNMP(
-        dx + dg, dy, n_max, m_max, [512, 512],
-        decoder_hidden_dims=[512, 512], batch_size=batch_size, device=device,
+        dx + dg, dy, n_max, m_max, list(args.encoder_dims),
+        decoder_hidden_dims=list(args.decoder_dims), batch_size=batch_size, device=device,
     )
     opt = torch.optim.Adam(lr=args.lr, params=cnmp_.parameters())
 
@@ -227,6 +236,7 @@ def train_one_split(
 
     epoch_iter = max(1, num_demos // batch_size)
     min_vl = np.inf
+    best_epoch = 0
     avg_loss = 0.0
     tl, ve = [], []
 
@@ -274,17 +284,28 @@ def train_one_split(
                 ve_avg = sse / n_elem if n_elem else float("inf")
                 if ve_avg < min_vl:
                     min_vl = ve_avg
+                    best_epoch = epoch
                     print(f"  [{action}/{seed}] CNMP new best: {min_vl:.6f}")
                     torch.save(cnmp_.state_dict(), best_path)
                 ve.append(ve_avg)
 
             message = (
                 f"Epoch: {epoch}, Loss: {avg_loss/args.val_per_epoch:.4f}, "
-                f"Val MSE: {ve_avg:.6f}, Min Err: {min_vl:.6f}\n"
+                f"Val MSE: {ve_avg:.6f}, Min Err: {min_vl:.6f} (best @ ep {best_epoch})\n"
             )
             print(message, end="")
             log_training_stats(message, log_file)
             avg_loss = 0.0
+
+            if args.patience_epochs > 0 and (epoch - best_epoch) >= args.patience_epochs:
+                stop_msg = (
+                    f"Early stop at epoch {epoch}: no val improvement for "
+                    f"{epoch - best_epoch} epochs (patience={args.patience_epochs}, "
+                    f"best={min_vl:.6f} @ ep {best_epoch}).\n"
+                )
+                print(stop_msg, end="")
+                log_training_stats(stop_msg, log_file)
+                break
 
         if epoch % args.snapshot_per_epoch == 0 and epoch > 1:
             torch.save(cnmp_.state_dict(), snapshot_path)

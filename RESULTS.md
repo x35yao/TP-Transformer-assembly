@@ -13,35 +13,37 @@ Reported numbers are **per-action mean ± std across the 5 seeds** (each seed's 
 
 ---
 
-## Experiment 2 — Augmentation comparison (TP vs random rotation, K=15)
+## Experiment 2 — Augmentation comparison (TP-aug vs random rotation vs none, K=15)
 
-Compares the task-parameterised data augmentation (TP-aug) against a simple random rotation augmentation, holding everything else (model, dataset, training schedule) fixed at K=15 train demos per action.
+Compares three augmentation regimes for the TP-Transformer, holding everything else (model, dataset, training schedule) fixed at K=15 train demos per action: **TP-aug** (task-parameterised augmentation), **random rotation** (a naive geometric augmentation), and **none** (train on the raw K demos with no augmentation). The "none" arm is the natural control: it tells us whether an augmentation actually helps over doing nothing.
 
 ### Position error (ADE, mm)
 
-| Action   | TP-aug         | Random rotation | TP-aug improvement |
-|----------|----------------|-----------------|--------------------|
-| action_0 | **19.0 ± 5.0** | 54.4 ± 11.3     | 2.9× lower         |
-| action_1 | **17.9 ± 2.8** | 63.8 ± 13.5     | 3.6× lower         |
-| action_2 | **16.3 ± 2.7** | 54.8 ± 8.5      | 3.4× lower         |
-| **mean** | **17.7**       | 57.7            | **3.3× lower**     |
+| Action   | TP-aug         | None            | Random rotation |
+|----------|----------------|-----------------|-----------------|
+| action_0 | **19.0 ± 5.0** | 30.7 ± 4.5      | 54.4 ± 11.3     |
+| action_1 | **17.9 ± 2.8** | 29.7 ± 2.4      | 63.8 ± 13.5     |
+| action_2 | **16.3 ± 2.7** | 20.3 ± 2.0      | 54.8 ± 8.5      |
+| **mean** | **17.7**       | 26.9            | 57.7            |
 
 ### Orientation error (NDQ)
 
-| Action   | TP-aug              | Random rotation     | TP-aug improvement |
-|----------|---------------------|---------------------|--------------------|
-| action_0 | **0.026 ± 0.004**   | 0.107 ± 0.027       | 4.1× lower         |
-| action_1 | **0.035 ± 0.018**   | 0.218 ± 0.036       | 6.2× lower         |
-| action_2 | **0.016 ± 0.004**   | 0.250 ± 0.106       | 16× lower          |
-| **mean** | **0.026**           | 0.192               | **7.4× lower**     |
+| Action   | TP-aug              | None                | Random rotation     |
+|----------|---------------------|---------------------|---------------------|
+| action_0 | **0.026 ± 0.004**   | 0.050 ± 0.007       | 0.107 ± 0.027       |
+| action_1 | **0.035 ± 0.018**   | 0.094 ± 0.024       | 0.218 ± 0.036       |
+| action_2 | **0.016 ± 0.004**   | 0.038 ± 0.009       | 0.250 ± 0.106       |
+| **mean** | **0.026**           | 0.061               | 0.192               |
 
 ### Findings
 
-- **TP-aug is dramatically better than random rotation on every action**, both in position (3.3× lower mean ADE) and orientation (7.4× lower mean NDQ).
-- The gap is **larger than the inter-seed variance**: every TP-aug seed beats every random rotation seed in absolute terms (no overlap).
-- Random rotation degrades **orientation** more than position, suggesting that the geometric structure TP-aug preserves (rotating only position vs. orientation as task requires) is essential for tight rotational accuracy.
+- **Only TP-aug improves over the no-augmentation baseline.** Ordering is TP-aug (17.7 mm) < none (26.9 mm) < random rotation (57.7 mm). TP-aug is **1.5× lower ADE** and **2.3× lower NDQ** than training with no augmentation.
+- **Naive random rotation is *worse than doing nothing*** — 2.1× higher ADE and 3.1× higher NDQ than the no-augmentation baseline. Rotating trajectories without respecting the task geometry injects training signal that is inconsistent with the object-pose conditioning, actively harming the model.
+- This makes the case for TP-aug much stronger than a head-to-head against random rotation alone would: augmentation is **not** automatically beneficial; it helps only when it preserves the task-parameterised structure.
+- Random rotation degrades **orientation** most (16× worse than TP-aug on action_2), confirming that the geometric structure TP-aug preserves is essential for tight rotational accuracy.
+- All three arms are evaluated identically (same test demos, same deterministic single forward pass per demo; no test-time augmentation or averaging), so the differences reflect the training-time augmentation choice alone.
 
-![Experiment 2 — TP-aug vs random rotation](figures/results/exp2_augmentation.png)
+![Experiment 2 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
 
 ---
 
@@ -218,7 +220,7 @@ alter the loss formulation.
 
 | Question                                            | Result |
 |-----------------------------------------------------|--------|
-| Does TP-augmentation help over plain random rotation? | **Yes** — 3.3× lower ADE, 7.4× lower NDQ at K=15. |
+| Does TP-augmentation help over plain random rotation? | **Yes** — 3.3× lower ADE, 7.4× lower NDQ at K=15. And random rotation is *worse than no augmentation* (57.7 vs 26.9 mm), so only TP-aug beats the no-aug baseline (17.7 vs 26.9 mm). |
 | How does TP-Transformer compare to classical baselines? | **Best at every K and every action**, with the largest margin at K=1. |
 | How does it compare to deep CNP baselines (CNEP, CNMP)? | **Best by 3–5×.** CNEP/CNMP plateau at ~87–130 mm and never beat even TP-ProMP; training regime (single- vs multi-context) barely matters. |
 | Is the TP-Transformer worth the added complexity? | **Yes for low-data (K ≤ 5).** Classical baselines never close the gap, even at K=15. |

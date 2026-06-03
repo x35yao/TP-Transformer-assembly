@@ -40,6 +40,10 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         cfg.scheduler_patience_steps = args.scheduler_patience_steps
     if args.output_root:
         cfg.output_root = args.output_root
+    if args.num_rotations is not None:
+        cfg.tta_rotations = args.num_rotations
+    if args.tta_axis:
+        cfg.tta_axis = args.tta_axis
     return cfg
 
 
@@ -91,6 +95,13 @@ def parse_args() -> argparse.Namespace:
                              "On PCS compute nodes set this to "
                              "/shared/$USER/RingAIAutoAnnotation/eval "
                              "since /home is read-only.")
+    parser.add_argument("--num-rotations", type=int, default=None,
+                        help="Validation-time rotation averaging: number of evenly-spaced "
+                             "rotations to average for the best-checkpoint (important_dist) "
+                             "metric (0 or 1 = off). Per-segment training losses are "
+                             "unaffected. Match this to predict-time --num-rotations.")
+    parser.add_argument("--tta-axis", type=str, default=None, choices=["x", "y", "z"],
+                        help="Rotation axis for validation-time TTA (default 'z').")
     return parser.parse_args()
 
 

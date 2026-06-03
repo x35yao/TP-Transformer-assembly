@@ -56,5 +56,8 @@ scripts/slurm/
 scripts/exp2_summary.py
 scripts/lr_sweep_summary.py
 
+# Local planning notes (not part of the repo)
+TODO.md
+
 # Local data archive (the unzipped contents under data/raw/ are what's used).
 data/raw_data.zip

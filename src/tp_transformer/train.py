@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .data import TASK_DIMS, build_datasets
+from .inference import assemble_result, tta_assemble_result
 from .losses import action_tag_loss, get_mask, weighted_pose_grasp_loss_func
 from .utils import get_n_params
 
@@ -189,11 +190,23 @@ def valid_traj_epoch(
     quat_weight: float = 1,
     grasp_weight: float = 1,
     action_weight: float = 1,
+    tta_rotations: int = 0,
+    tta_axis: str = "z",
 ):
     """Run one validation epoch (no gradient computation).
-    
-    Same structure as train_traj_epoch but with torch.no_grad() and
-    additional accuracy metrics (grasp accuracy, action accuracy).
+
+    The full trajectory is assembled once (segment-by-segment, or with
+    test-time rotation averaging when ``tta_rotations > 1``), and the
+    position/orientation/grasp losses are computed on that assembled trajectory
+    over all real (non-padding) timesteps -- not summed per segment. Action
+    loss/accuracy comes from the per-segment forward passes (the action head is
+    a per-pass output, not part of the assembled trajectory). pick/release/
+    important distances and best-checkpoint selection use the assembled
+    trajectory.
+
+    Note: trajectory loss values here are NOT directly comparable to
+    ``train_traj_epoch`` (which sums per-segment); they are whole-trajectory
+    means. Best-checkpoint selection uses important_dist, not loss.
     """
     model.eval()
     total_losses, pos_losses, ori_losses, grasp_losses, grasp_accuracies, action_losses, action_accuracies = [], [], [], [], [], [], []
@@ -208,53 +221,69 @@ def valid_traj_epoch(
         traj_seq = traj_seq.to(device)
         traj_hidden = traj_hidden.to(device)
         action_tag_gt = action_tag_gt.to(device)
-        result = traj_hidden.clone()
-        tmp = torch.zeros((result.shape[0], result.shape[1], 1)).to(device)
-        result = torch.cat((tmp, result), dim=2)
         
         with torch.no_grad():
-            for i in range(obj_seq.shape[1]):
-                loss_start_inds = input_end_inds = img_inds[:, i]
-                if i != obj_seq.shape[1] - 1:
-                    loss_end_inds = img_inds[:, i + 1]
-                else:
-                    loss_end_inds = torch.ones(obj_seq.shape[0], dtype=torch.int) * (-1)
-                
-                output_seq, action_tag_seq = model(obj_seq[:, i, :, :], traj_hidden, tgt_padding_mask=padding_mask, predict_action=True)
-                
-                # Accumulate predictions
-                for (start, end) in zip(loss_start_inds, loss_end_inds):
-                    result[:, start:end, : len(TASK_DIMS) + 1] = output_seq[:, start:end]
-                
-                # Action loss and accuracy
-                labels_gt = torch.argmax(action_tag_gt, axis=1)
-                action_loss = action_loss_func(action_tag_seq, labels_gt) * action_weight
-                action_losses.append(action_loss.item())
-                labels_pred = torch.argmax(action_tag_seq, dim=1)
-                action_accuracy = (labels_pred == labels_gt).float().mean()
-                action_accuracies.append(action_accuracy.item())
-                
-                # Trajectory losses
-                loss_mask = get_mask(output_seq.shape, loss_start_inds, loss_end_inds).to(device)
-                masked_weights = weights * loss_mask
-                pos_loss, ori_loss, grasp_loss = traj_loss_func(
-                    output_seq, traj_seq[:, :, : len(TASK_DIMS) + 1], masked_weights, quat_weight=quat_weight, pos_weight=pos_weight, grasp_weight=grasp_weight
+            # --- Assemble the full predicted trajectory once ---
+            # Only random-rotation-trained models use rotation averaging; for
+            # everything else this is a single deterministic segment-by-segment
+            # pass. The caller already gates tta_rotations on the augmentation
+            # method, so here we just branch on the effective value.
+            if tta_rotations and tta_rotations > 1:
+                result = tta_assemble_result(
+                    model, obj_seq, traj_hidden, padding_mask, img_inds,
+                    len(TASK_DIMS), device,
+                    num_rotations=tta_rotations, axis=tta_axis,
                 )
-                loss = pos_loss + ori_loss + grasp_loss + action_loss
-                total_losses.append(loss.item())
-                pos_losses.append(pos_loss.item())
-                ori_losses.append(ori_loss.item())
-                grasp_losses.append(grasp_loss.item())
-                
-                # Grasp detection accuracy (within masked region)
-                grasp_label_pred = output_seq[:, :, len(TASK_DIMS)] > 0.5
-                grasp_label_gt = traj_seq[:, :, len(TASK_DIMS)] > 0.5
-                grasp_mask = loss_mask[:, :, len(TASK_DIMS)]
-                grasp_label_pred = grasp_label_pred * grasp_mask
-                grasp_label_gt = grasp_label_gt * grasp_mask
-                grasp_accuracy = (grasp_label_pred == grasp_label_gt).float().mean()
-                grasp_accuracies.append(grasp_accuracy.item())
-            
+            else:
+                result = assemble_result(
+                    model, obj_seq, traj_hidden, padding_mask, img_inds,
+                    len(TASK_DIMS), device,
+                )
+
+            n_task = len(TASK_DIMS)
+            pred_traj = result[:, :, : n_task + 1]          # (B, T, 8) pos+quat+grasp
+            gt_traj = traj_seq[:, :, : n_task + 1]
+            # Whole-trajectory mask: all real (non-padding) timesteps. The union
+            # of the per-segment masks is exactly the non-padding region, so this
+            # matches the timesteps the old per-segment loop scored.
+            valid_mask = (~padding_mask).to(device).unsqueeze(-1).float()  # (B, T, 1)
+            masked_weights = weights * valid_mask
+            pos_loss, ori_loss, grasp_loss = traj_loss_func(
+                pred_traj, gt_traj, masked_weights,
+                quat_weight=quat_weight, pos_weight=pos_weight, grasp_weight=grasp_weight,
+            )
+
+            # Grasp detection accuracy over the whole trajectory (real timesteps).
+            grasp_mask = valid_mask[:, :, 0] > 0
+            grasp_label_pred = (pred_traj[:, :, n_task] > 0.5) * grasp_mask
+            grasp_label_gt = (gt_traj[:, :, n_task] > 0.5) * grasp_mask
+            grasp_accuracy = (grasp_label_pred == grasp_label_gt).float().mean()
+            grasp_accuracies.append(grasp_accuracy.item())
+
+            # --- Action loss/accuracy from the (unrotated) per-segment passes ---
+            # The action head is a per-forward-pass output, not part of the
+            # assembled trajectory, so it is computed from a plain segment loop
+            # on the unrotated scene. Averaged across segments (as before).
+            seg_action_losses = []
+            labels_gt = torch.argmax(action_tag_gt, axis=1)
+            for i in range(obj_seq.shape[1]):
+                _out, action_tag_seq = model(
+                    obj_seq[:, i, :, :], traj_hidden,
+                    tgt_padding_mask=padding_mask, predict_action=True,
+                )
+                a_loss = action_loss_func(action_tag_seq, labels_gt) * action_weight
+                seg_action_losses.append(a_loss)
+                labels_pred = torch.argmax(action_tag_seq, dim=1)
+                action_accuracies.append((labels_pred == labels_gt).float().mean().item())
+            action_loss = torch.stack(seg_action_losses).mean()
+            action_losses.append(action_loss.item())
+
+            # Total = whole-trajectory pose/grasp loss + mean action loss.
+            total_losses.append((pos_loss + ori_loss + grasp_loss + action_loss).item())
+            pos_losses.append(pos_loss.item())
+            ori_losses.append(ori_loss.item())
+            grasp_losses.append(grasp_loss.item())
+
             # Pick/release/important distances
             output_pick = result[torch.arange(result.shape[0]), pick_inds.squeeze(), :3]
             output_release = result[torch.arange(result.shape[0]), release_inds.squeeze(), :3]
@@ -350,8 +379,11 @@ def train_model(config: TrainConfig) -> None:
     
     log_file = os.path.join(folder, "training_log.txt")
     
-    # Best-on-validation tracking (lower important_dist = better)
-    best_v_important_dist = float("inf")
+    # Best-on-validation tracking. Selection metric is the validation POSE loss
+    # (pos_loss + ori_loss, config-weighted) -- this matches what we actually
+    # evaluate (position + orientation accuracy) rather than the high-weight-only
+    # important_dist. The same metric drives the LR scheduler and early stop.
+    best_v_pose_loss = float("inf")
     best_epoch = -1
     epochs_since_improvement = 0
     
@@ -393,19 +425,27 @@ def train_model(config: TrainConfig) -> None:
             grasp_weight=config.grasp_weight,
             quat_weight=config.quat_weight,
             action_weight=config.action_weight,
+            # TTA (rotation averaging at eval) is only meaningful for models
+            # trained with random-rotation augmentation; tp/none always do a
+            # single deterministic pass.
+            tta_rotations=(config.tta_rotations if config.augmentation_method == "random" else 0),
+            tta_axis=config.tta_axis,
         )
         
         v_loss_mean = np.mean(v_loss)
         v_important_dist_mean = float(np.mean(v_important_dists))
+        # Selection metric: validation pose loss = pos + ori (config-weighted).
+        v_pose_loss_mean = float(np.mean(v_pos_loss) + np.mean(v_ori_loss))
         
-        # --- Track best-on-validation ---
-        improved = v_important_dist_mean < best_v_important_dist
+        # --- Track best-on-validation (by pose loss) ---
+        improved = v_pose_loss_mean < best_v_pose_loss
         if improved:
-            best_v_important_dist = v_important_dist_mean
+            best_v_pose_loss = v_pose_loss_mean
             best_epoch = epoch
             epochs_since_improvement = 0
             torch.save(
-                {"epoch": epoch, "model_state_dict": model.state_dict(), "v_important_dist": best_v_important_dist},
+                {"epoch": epoch, "model_state_dict": model.state_dict(),
+                 "v_pose_loss": best_v_pose_loss, "v_important_dist": v_important_dist_mean},
                 os.path.join(folder, "model_best.pth"),
             )
         else:
@@ -423,7 +463,7 @@ def train_model(config: TrainConfig) -> None:
                 f"Valid   : total loss {round(v_loss_mean, 3)}, pos loss {round(np.mean(v_pos_loss), 3)}, ori loss {round(np.mean(v_ori_loss), 3)}, "
                 f"grasp loss {round(np.mean(v_grasp_loss), 3)}, action loss {round(np.mean(v_action_loss), 3)}, grasp accuracy {round(np.mean(v_grasp_accuracies), 3)}, "
                 f"action accuracy {round(np.mean(v_action_accuracies), 3)}, pick dist {round(np.mean(v_pick_dists), 3)}, release dist {round(np.mean(v_release_dists), 3)},  important dist {round(v_important_dist_mean, 3)}\n"
-                f"Best    : epoch {best_epoch}, important dist {round(best_v_important_dist, 3)}, epochs_since_improvement {epochs_since_improvement}\n"
+                f"Best    : epoch {best_epoch}, pose loss {round(best_v_pose_loss, 3)}, epochs_since_improvement {epochs_since_improvement}\n"
             )
             print(message)
             log_training_stats(message, log_file)
@@ -433,6 +473,7 @@ def train_model(config: TrainConfig) -> None:
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "v_pose_loss": v_pose_loss_mean,
                 "v_important_dist": v_important_dist_mean,
             }
             if config.save_optimizer:
@@ -441,8 +482,8 @@ def train_model(config: TrainConfig) -> None:
             torch.save(checkpoint, os.path.join(folder, f"model_{epoch}.pth"))
             torch.save(checkpoint, os.path.join(folder, "model_last.pth"))
         
-        # Step LR scheduler based on validation important distance
-        scheduler.step(v_important_dist_mean)
+        # Step LR scheduler based on validation pose loss
+        scheduler.step(v_pose_loss_mean)
         
         # --- Stop when LR floors out (scheduler can't reduce further) ---
         # Once the LR scheduler hits its `min_lr` floor, parameter updates are
@@ -453,7 +494,7 @@ def train_model(config: TrainConfig) -> None:
             message = (
                 f"\n[{timestamp}] LR floor reached at epoch {epoch}: "
                 f"current_lr={current_lr:g} <= min_lr={config.min_lr:g} "
-                f"(best epoch {best_epoch}, best important dist {round(best_v_important_dist, 3)}).\n"
+                f"(best epoch {best_epoch}, best pose loss {round(best_v_pose_loss, 3)}).\n"
             )
             print(message)
             log_training_stats(message, log_file)
@@ -465,7 +506,7 @@ def train_model(config: TrainConfig) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     final_msg = (
         f"\n[{timestamp}] Training finished. "
-        f"Best epoch: {best_epoch}, best val important dist: {round(best_v_important_dist, 3)}. "
+        f"Best epoch: {best_epoch}, best val pose loss: {round(best_v_pose_loss, 3)}. "
         f"Best checkpoint: {os.path.join(folder, 'model_best.pth')}\n"
     )
     print(final_msg)

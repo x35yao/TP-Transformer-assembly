@@ -48,7 +48,7 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .data import TASK_DIMS, build_datasets
-from .inference import tta_assemble_result
+from .inference import assemble_result, tta_assemble_result
 from .train import build_model
 from .utils import get_n_params
 
@@ -131,6 +131,10 @@ def predict_test_set(
 
     n_dims = len(TASK_DIMS)  # 7
 
+    # TTA (rotation averaging) is only meaningful for random-rotation-trained
+    # models; tp/none always do a single deterministic pass.
+    eff_tta = config.tta_rotations if config.augmentation_method == "random" else 0
+
     print(f"Device: {device}")
     print(f"Model parameters: {get_n_params(model)}")
     print(f"Checkpoint: {checkpoint}")
@@ -153,20 +157,18 @@ def predict_test_set(
             traj_seq = traj_seq.to(device)
             padding_mask = padding_mask.to(device)
 
-            # Segment-by-segment decode, optionally with test-time rotation
-            # averaging. num_rotations <= 1 is a single deterministic pass
-            # identical to the previous inlined loop.
-            result = tta_assemble_result(
-                model,
-                obj_seq,
-                traj_hidden,
-                padding_mask,
-                img_inds,
-                n_dims,
-                device,
-                num_rotations=config.tta_rotations,
-                axis=config.tta_axis,
-            )
+            # Segment-by-segment decode, with rotation averaging only for
+            # random-rotation-trained models (eff_tta > 1).
+            if eff_tta and eff_tta > 1:
+                result = tta_assemble_result(
+                    model, obj_seq, traj_hidden, padding_mask, img_inds,
+                    n_dims, device, num_rotations=eff_tta, axis=config.tta_axis,
+                    rng=np.random.default_rng(config.seed + sample_idx),
+                )
+            else:
+                result = assemble_result(
+                    model, obj_seq, traj_hidden, padding_mask, img_inds, n_dims, device,
+                )
 
             # Slice by padding mask to get the actual (T_valid, 7) prediction.
             pred = result[0, :, :n_dims].cpu().numpy()

@@ -45,6 +45,25 @@ Compares three augmentation regimes for the TP-Transformer, holding everything e
 
 ![Experiment 2 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
 
+### Test-time rotation averaging (TTA)
+
+We also tested whether test-time rotation averaging helps the random-rotation
+model: at inference, rotate the encoder object scene, predict, rotate the
+predicted trajectory back, and average over 5 rotations (matching the
+training-time random-rotation distribution).
+
+| Model                       | mean ADE (mm) | mean NDQ |
+|-----------------------------|---------------|----------|
+| Random rotation (no TTA)    | 57.7          | 0.192    |
+| Random rotation + TTA (×5)  | 77.9          | 0.192    |
+
+TTA makes position error **worse** (57.7 → 77.9 mm) and leaves orientation
+unchanged. The model trained with random rotation is not rotation-equivariant —
+feeding it a rotated scene and rotating the output back does not reproduce the
+unrotated prediction (round-trip position difference ≈ 50 mm on average) — so
+averaging over rotations blends inconsistent trajectories rather than denoising
+them. TTA is therefore not used for the reported numbers.
+
 ---
 
 ## Experiment 1 — Methods × number of training demos

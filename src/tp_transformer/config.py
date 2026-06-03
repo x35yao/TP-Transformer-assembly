@@ -53,3 +53,7 @@ class TrainConfig:
     augmentation_method: str = "tp"  # Augmentation method: "tp" (task-parameterized), "random" (random rotation), or "none" (no augmentation; train on raw K demos)
     aug_date: str = "2025-02-17"  # Date folder for pre-computed augmentation data (augmentation/<date>/)
     traj_obj_ind: int = 4  # Index of the "trajectory" object in the object list (used to skip augmenting self)
+
+    # --- Test-time rotation averaging (TTA) ---
+    tta_rotations: int = 0  # Number of evenly-spaced rotations to average at inference. 0 or 1 = off (single deterministic pass). Used by predict (and validation when wired).
+    tta_axis: str = "z"  # Rotation axis for TTA; should match the training-time augment_random_rotation axis ("z").

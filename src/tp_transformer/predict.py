@@ -48,6 +48,7 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .data import TASK_DIMS, build_datasets
+from .inference import tta_assemble_result
 from .train import build_model
 from .utils import get_n_params
 
@@ -152,29 +153,20 @@ def predict_test_set(
             traj_seq = traj_seq.to(device)
             padding_mask = padding_mask.to(device)
 
-            # Initialise result buffer matching train/valid loops.
-            result = traj_hidden.clone()
-            zero_col = torch.zeros((result.shape[0], result.shape[1], 1), device=device)
-            result = torch.cat((zero_col, result), dim=2)
-
-            # Forward pass per camera capture segment.
-            n_segments = obj_seq.shape[1]
-            for i in range(n_segments):
-                loss_start_inds = img_inds[:, i]
-                if i == n_segments - 1:
-                    loss_end_inds = torch.ones(obj_seq.shape[0], dtype=torch.int) * (-1)
-                else:
-                    loss_end_inds = img_inds[:, i + 1]
-
-                output_seq, _action_logits = model(
-                    obj_seq[:, i, :, :],
-                    traj_hidden,
-                    tgt_padding_mask=padding_mask,
-                    predict_action=True,
-                )
-
-                for (start, end) in zip(loss_start_inds, loss_end_inds):
-                    result[:, start:end, : n_dims + 1] = output_seq[:, start:end]
+            # Segment-by-segment decode, optionally with test-time rotation
+            # averaging. num_rotations <= 1 is a single deterministic pass
+            # identical to the previous inlined loop.
+            result = tta_assemble_result(
+                model,
+                obj_seq,
+                traj_hidden,
+                padding_mask,
+                img_inds,
+                n_dims,
+                device,
+                num_rotations=config.tta_rotations,
+                axis=config.tta_axis,
+            )
 
             # Slice by padding mask to get the actual (T_valid, 7) prediction.
             pred = result[0, :, :n_dims].cpu().numpy()

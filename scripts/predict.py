@@ -54,6 +54,10 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         cfg.aug_date = args.aug_date
     if args.output_root:
         cfg.output_root = args.output_root
+    if args.num_rotations is not None:
+        cfg.tta_rotations = args.num_rotations
+    if args.tta_axis:
+        cfg.tta_axis = args.tta_axis
     return cfg
 
 
@@ -90,6 +94,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=str, default=None,
                         help="Override the default "
                              "<output_root>/<model_name>/<seed>/predictions.pickle.")
+    parser.add_argument("--num-rotations", type=int, default=None,
+                        help="Test-time rotation averaging: number of evenly-spaced "
+                             "rotations to average (0 or 1 = off, a single deterministic "
+                             "pass). Rotates encoder object poses, predicts, rotates the "
+                             "output back, and averages. Useful for random-rotation-trained "
+                             "models.")
+    parser.add_argument("--tta-axis", type=str, default=None, choices=["x", "y", "z"],
+                        help="Rotation axis for TTA (default 'z', matching training-time "
+                             "random rotation).")
     return parser.parse_args()
 
 

@@ -316,6 +316,41 @@ def augment(
 # Random Rotation Augmentation (alternative to TP-augmentation)
 # ---------------------------------------------------------------------------
 
+def rotate_pose_about(
+    x: np.ndarray, degree: float, center: np.ndarray, axis: str = "z"
+) -> np.ndarray:
+    """Rotate pose rows by an explicit angle about an explicit center.
+
+    Parameterized (and therefore invertible) version of `random_rotation`:
+    the same rotation can be undone by calling again with `-degree` and the
+    same `center` + `axis`. This is what test-time rotation averaging needs
+    (rotate the encoder scene by +deg, run the model, then rotate the
+    predicted trajectory back by -deg about the SAME center).
+
+    Position (cols 0:3) and quaternion (cols 3:7) are rotated together via
+    `lintrans`; any extra columns (>= 7, e.g. one-hot object/task tags or a
+    grasp flag) are left untouched.
+
+    Args:
+        x: Pose data of shape (N, D) where D >= 7 [pos(3), quat(4), ...].
+        degree: Rotation angle in degrees.
+        center: (3,) pivot point in the same units as positions (x[:, :3]).
+        axis: Rotation axis ('x', 'y', or 'z').
+
+    Returns:
+        Rotated pose data of the same shape as `x`.
+    """
+    rot = R.from_euler(axis, degree, degrees=True)
+    H = np.zeros([4, 4])
+    H[:3, :3] = rot.as_matrix()
+    new_x = x.copy()
+    center = np.asarray(center).reshape(3)
+    new_x[:, :3] = new_x[:, :3] - center
+    new_x[:, :7] = lintrans(new_x[:, :7], H)
+    new_x[:, :3] = new_x[:, :3] + center
+    return new_x
+
+
 def random_rotation(x: np.ndarray, axis: str = "x") -> np.ndarray:
     """Apply a random rotation to pose data around the given axis.
     
@@ -333,18 +368,10 @@ def random_rotation(x: np.ndarray, axis: str = "x") -> np.ndarray:
     Returns:
         Rotated pose data of same shape
     """
-    new_x = x.copy()
     degree = random.randrange(0, 360)
     idx = random.randrange(0, x.shape[0])
-    rot = R.from_euler(axis, degree, degrees=True)
-    H = np.zeros([4, 4])
-    H[:3, :3] = rot.as_matrix()
-    # Center at a random point, rotate, then restore
-    rand_pt = x[idx, :3].copy()
-    new_x[:, :3] = new_x[:, :3] - rand_pt
-    new_x[:, :7] = lintrans(new_x[:, :7], H)
-    new_x[:, :3] = new_x[:, :3] + rand_pt
-    return new_x
+    center = x[idx, :3].copy()  # Center at a random point
+    return rotate_pose_about(x, degree, center, axis=axis)
 
 
 def augment_random_rotation(

@@ -44,6 +44,10 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         cfg.tta_rotations = args.num_rotations
     if args.tta_axis:
         cfg.tta_axis = args.tta_axis
+    if args.selection_metric:
+        cfg.selection_metric = args.selection_metric
+    if args.scheduler_metric:
+        cfg.scheduler_metric = args.scheduler_metric
     return cfg
 
 
@@ -102,6 +106,17 @@ def parse_args() -> argparse.Namespace:
                              "unaffected. Match this to predict-time --num-rotations.")
     parser.add_argument("--tta-axis", type=str, default=None, choices=["x", "y", "z"],
                         help="Rotation axis for validation-time TTA (default 'z').")
+    parser.add_argument("--selection-metric", type=str, default=None,
+                        choices=["important_dist", "pose_loss", "total_loss"],
+                        help="Validation metric driving best-checkpoint selection. "
+                             "important_dist = error at high-weight (grasp/critical) steps; "
+                             "pose_loss = pos+ori over the whole trajectory; "
+                             "total_loss = pos+ori+grasp+action. Default important_dist.")
+    parser.add_argument("--scheduler-metric", type=str, default=None,
+                        choices=["important_dist", "pose_loss", "total_loss"],
+                        help="Validation metric driving the LR scheduler step and the "
+                             "LR-floor early-stop (decoupled from --selection-metric). "
+                             "Default important_dist.")
     return parser.parse_args()
 
 

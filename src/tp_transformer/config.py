@@ -57,3 +57,15 @@ class TrainConfig:
     # --- Test-time rotation averaging (TTA) ---
     tta_rotations: int = 0  # Number of evenly-spaced rotations to average at inference. 0 or 1 = off (single deterministic pass). Used by predict (and validation when wired).
     tta_axis: str = "z"  # Rotation axis for TTA; should match the training-time augment_random_rotation axis ("z").
+
+    # --- Model selection ---
+    # Validation metric that drives best-checkpoint selection. One of:
+    #   "important_dist" : L2 error at high-weight (grasp/critical) timesteps only
+    #   "pose_loss"      : pos_loss + ori_loss over the whole trajectory
+    #   "total_loss"     : pos + ori + grasp + action over the whole trajectory
+    selection_metric: str = "important_dist"
+    # Validation metric that drives the LR scheduler step and the LR-floor
+    # early-stop. Same options as selection_metric; decoupled so the scheduler
+    # can use a different (e.g. convergence-sensitive) signal than the
+    # checkpoint selector.
+    scheduler_metric: str = "important_dist"

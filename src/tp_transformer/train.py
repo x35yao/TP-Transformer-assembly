@@ -379,11 +379,9 @@ def train_model(config: TrainConfig) -> None:
     
     log_file = os.path.join(folder, "training_log.txt")
     
-    # Best-on-validation tracking. Selection metric is the validation POSE loss
-    # (pos_loss + ori_loss, config-weighted) -- this matches what we actually
-    # evaluate (position + orientation accuracy) rather than the high-weight-only
-    # important_dist. The same metric drives the LR scheduler and early stop.
-    best_v_pose_loss = float("inf")
+    # Best-on-validation tracking. The selection metric (config.selection_metric)
+    # drives best-checkpoint, the LR scheduler, and the early-stop.
+    best_v_select = float("inf")
     best_epoch = -1
     epochs_since_improvement = 0
     
@@ -434,18 +432,33 @@ def train_model(config: TrainConfig) -> None:
         
         v_loss_mean = np.mean(v_loss)
         v_important_dist_mean = float(np.mean(v_important_dists))
-        # Selection metric: validation pose loss = pos + ori (config-weighted).
         v_pose_loss_mean = float(np.mean(v_pos_loss) + np.mean(v_ori_loss))
-        
-        # --- Track best-on-validation (by pose loss) ---
-        improved = v_pose_loss_mean < best_v_pose_loss
+
+        # Validation metrics available for selection / scheduling.
+        _metric_values = {
+            "important_dist": v_important_dist_mean,
+            "pose_loss": v_pose_loss_mean,
+            "total_loss": float(v_loss_mean),
+        }
+        for _name in (config.selection_metric, config.scheduler_metric):
+            if _name not in _metric_values:
+                raise ValueError(
+                    f"unknown metric={_name!r}; expected one of {sorted(_metric_values)}"
+                )
+        v_select = _metric_values[config.selection_metric]   # best-checkpoint
+        v_sched = _metric_values[config.scheduler_metric]     # LR scheduler + early-stop
+
+        # --- Track best-on-validation (by the configured selection metric) ---
+        improved = v_select < best_v_select
         if improved:
-            best_v_pose_loss = v_pose_loss_mean
+            best_v_select = v_select
             best_epoch = epoch
             epochs_since_improvement = 0
             torch.save(
                 {"epoch": epoch, "model_state_dict": model.state_dict(),
-                 "v_pose_loss": best_v_pose_loss, "v_important_dist": v_important_dist_mean},
+                 "selection_metric": config.selection_metric, "v_select": best_v_select,
+                 "v_pose_loss": v_pose_loss_mean, "v_total_loss": float(v_loss_mean),
+                 "v_important_dist": v_important_dist_mean},
                 os.path.join(folder, "model_best.pth"),
             )
         else:
@@ -463,7 +476,7 @@ def train_model(config: TrainConfig) -> None:
                 f"Valid   : total loss {round(v_loss_mean, 3)}, pos loss {round(np.mean(v_pos_loss), 3)}, ori loss {round(np.mean(v_ori_loss), 3)}, "
                 f"grasp loss {round(np.mean(v_grasp_loss), 3)}, action loss {round(np.mean(v_action_loss), 3)}, grasp accuracy {round(np.mean(v_grasp_accuracies), 3)}, "
                 f"action accuracy {round(np.mean(v_action_accuracies), 3)}, pick dist {round(np.mean(v_pick_dists), 3)}, release dist {round(np.mean(v_release_dists), 3)},  important dist {round(v_important_dist_mean, 3)}\n"
-                f"Best    : epoch {best_epoch}, pose loss {round(best_v_pose_loss, 3)}, epochs_since_improvement {epochs_since_improvement}\n"
+                f"Best    : epoch {best_epoch}, {config.selection_metric} {round(best_v_select, 3)}, epochs_since_improvement {epochs_since_improvement}\n"
             )
             print(message)
             log_training_stats(message, log_file)
@@ -474,6 +487,7 @@ def train_model(config: TrainConfig) -> None:
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "v_pose_loss": v_pose_loss_mean,
+                "v_total_loss": float(v_loss_mean),
                 "v_important_dist": v_important_dist_mean,
             }
             if config.save_optimizer:
@@ -482,8 +496,9 @@ def train_model(config: TrainConfig) -> None:
             torch.save(checkpoint, os.path.join(folder, f"model_{epoch}.pth"))
             torch.save(checkpoint, os.path.join(folder, "model_last.pth"))
         
-        # Step LR scheduler based on validation pose loss
-        scheduler.step(v_pose_loss_mean)
+        # Step LR scheduler based on the configured scheduler metric (drives LR
+        # decay and, via the LR floor below, the early-stop).
+        scheduler.step(v_sched)
         
         # --- Stop when LR floors out (scheduler can't reduce further) ---
         # Once the LR scheduler hits its `min_lr` floor, parameter updates are
@@ -494,7 +509,7 @@ def train_model(config: TrainConfig) -> None:
             message = (
                 f"\n[{timestamp}] LR floor reached at epoch {epoch}: "
                 f"current_lr={current_lr:g} <= min_lr={config.min_lr:g} "
-                f"(best epoch {best_epoch}, best pose loss {round(best_v_pose_loss, 3)}).\n"
+                f"(best epoch {best_epoch}, best {config.selection_metric} {round(best_v_select, 3)}).\n"
             )
             print(message)
             log_training_stats(message, log_file)
@@ -506,7 +521,7 @@ def train_model(config: TrainConfig) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     final_msg = (
         f"\n[{timestamp}] Training finished. "
-        f"Best epoch: {best_epoch}, best val pose loss: {round(best_v_pose_loss, 3)}. "
+        f"Best epoch: {best_epoch}, best val {config.selection_metric}: {round(best_v_select, 3)}. "
         f"Best checkpoint: {os.path.join(folder, 'model_best.pth')}\n"
     )
     print(final_msg)

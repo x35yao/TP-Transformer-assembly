@@ -13,7 +13,7 @@ Reported numbers are **per-action mean ± std across the 5 seeds** (each seed's 
 
 ---
 
-## Experiment 2 — Augmentation comparison (TP-aug vs random rotation vs none, K=15)
+## Experiment 1 — Augmentation comparison (TP-aug vs random rotation vs none, K=15)
 
 Compares three augmentation regimes for the TP-Transformer, holding everything else (model, dataset, training schedule) fixed at K=15 train demos per action: **TP-aug** (task-parameterised augmentation), **random rotation** (a naive geometric augmentation), and **none** (train on the raw K demos with no augmentation). The "none" arm is the natural control: it tells us whether an augmentation actually helps over doing nothing.
 
@@ -43,7 +43,7 @@ Compares three augmentation regimes for the TP-Transformer, holding everything e
 - Random rotation degrades **orientation** most (16× worse than TP-aug on action_2), confirming that the geometric structure TP-aug preserves is essential for tight rotational accuracy.
 - All three arms are evaluated identically (same test demos, same deterministic single forward pass per demo; no test-time augmentation or averaging), so the differences reflect the training-time augmentation choice alone.
 
-![Experiment 2 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
+![Experiment 1 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
 
 ### Test-time rotation averaging (TTA)
 
@@ -66,7 +66,7 @@ them. TTA is therefore not used for the reported numbers.
 
 ---
 
-## Experiment 1 — Methods × number of training demos
+## Experiment 2 — Methods × number of training demos
 
 Compares TP-Transformer against two classical task-parameterised baselines (TP-ProMP and TP-GMM) at K ∈ {1, 2, 5, 10, 15} demos per action. The valid/test demo IDs are bit-identical across K and across methods (reserve-eval-first sampler), so the comparison is apples-to-apples. K=2 was added because TP-GMM and TP-ProMP both rely on across-demo covariance, making K=1 degenerate for them; K=2 is the cleanest minimum-data point at which all three methods are well-defined in principle.
 
@@ -127,13 +127,13 @@ CNEP/CNMP are shown for both training regimes: **sc** = single-context, **mc** =
 
 - **Low-data robustness is TP-Transformer's strongest comparative advantage.** The gap to baselines is **largest at K=1–2** and *decreases* (in relative terms) as K grows. For applications where collecting demos is expensive, TP-Transformer dominates.
 
-![Experiment 1 — ADE vs K (linear, capped at 200 mm)](figures/results/exp1_ade_linear.png)
+![Experiment 2 — ADE vs K (linear, capped at 200 mm)](figures/results/exp1_ade_linear.png)
 
 (The linear plot caps at 200 mm so TP-GMM K=1 doesn't compress the rest of the panel; see log-scale variant below.)
 
-![Experiment 1 — ADE vs K (log scale)](figures/results/exp1_ade_log.png)
+![Experiment 2 — ADE vs K (log scale)](figures/results/exp1_ade_log.png)
 
-![Experiment 1 — NDQ vs K](figures/results/exp1_ndq.png)
+![Experiment 2 — NDQ vs K](figures/results/exp1_ndq.png)
 
 ---
 
@@ -232,6 +232,40 @@ mathematically identical to upstream. We also clamp `batch_size ≤ K` in the
 low-data regime and move tensors to the GPU once before the loop (a performance
 fix). These changes are required to evaluate CNEP/CNMP at K=1–2 at all and do not
 alter the loss formulation.
+
+---
+
+## Model-selection metric (TP-Transformer)
+
+All TP-Transformer runs minimize the same training objective
+(`pos + ori + grasp + action`, weighted, over the whole trajectory). The choice
+of *validation* metric that drives best-checkpoint selection, the LR-scheduler
+step, and the LR-floor early-stop is a separate design decision. We compared two
+options, holding everything else fixed (5 seeds each):
+
+- **important_dist** (used for all reported numbers): the L2 error evaluated only
+  at the high-weight grasp/critical waypoints.
+- **total_loss**: the full training objective (`pos + ori + grasp + action`),
+  i.e. select/schedule on exactly what is optimized.
+
+Mean ADE (mm) / NDQ across actions, TP-Transformer:
+
+| K  | ADE: important_dist | ADE: total_loss | NDQ: important_dist | NDQ: total_loss |
+|----|---------------------|-----------------|---------------------|-----------------|
+| 1  | **38.4**            | 48.0            | **0.068**           | 0.100           |
+| 2  | **26.0**            | 34.8            | **0.040**           | 0.059           |
+| 5  | **21.6**            | 25.9            | **0.036**           | 0.052           |
+| 10 | **18.1**            | 24.7            | **0.028**           | 0.048           |
+| 15 | **17.8**            | 18.9            | **0.026**           | 0.039           |
+
+**important_dist is the better selection signal at every K**, on both ADE and
+NDQ. The reason is that it tracks the hardest, last-to-converge part of the
+motion — the grasp/critical waypoints — so it keeps registering improvement (and
+keeps the LR scheduler from flooring) until those precision-critical segments
+have actually converged. The whole-trajectory `total_loss` is dominated by the
+many easy bulk timesteps, plateaus earlier, and floors the learning rate before
+the hard regions are fully learned, yielding a worse final model. We therefore
+select on `important_dist` for all reported results.
 
 ---
 

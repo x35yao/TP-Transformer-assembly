@@ -1,8 +1,6 @@
 # TP-Transformer — Experimental Results
 
-This document summarizes the two main experiments run for the TP-Transformer paper, using the canonical n-of-15 / 3-validation / 3-test split with five RNG seeds (9871, 9872, 9873, 9874, 9875).
-
-All experiments were run on PCS A100 (80 GB) GPUs. The TP-Transformer was trained with Adam at LR = 1e-4, batch size 8, with `ReduceLROnPlateau(patience=500 epochs at K=15, scaled to ~3000 gradient steps for fair comparison across K)` and stopped when the LR floor `min_lr=1e-7` was reached. Best-on-validation checkpoints were used for prediction. The CNEP/CNMP deep baselines inherit their architecture, loss, and optimizer settings from the original CNEP repository; see [Baseline training details](#baseline-training-details) for the full inherited-vs-chosen hyperparameter breakdown.
+This document summarizes the experiments run for the TP-Transformer paper, using the canonical n-of-15 / 3-validation / 3-test split with five RNG seeds (9871, 9872, 9873, 9874, 9875).
 
 Metrics:
 
@@ -13,11 +11,232 @@ Reported numbers are **per-action mean ± std across the 5 seeds** (each seed's 
 
 ---
 
-## Experiment 1 — Augmentation comparison (TP-aug vs random rotation vs none, K=15)
+## 1. Training the TP-Transformer
 
-Compares three augmentation regimes for the TP-Transformer, holding everything else (model, dataset, training schedule) fixed at K=15 train demos per action: **TP-aug** (task-parameterised augmentation), **random rotation** (a naive geometric augmentation), and **none** (train on the raw K demos with no augmentation). The "none" arm is the natural control: it tells us whether an augmentation actually helps over doing nothing.
+The TP-Transformer is an encoder–decoder Transformer that conditions on the
+scene's object poses (the task parameters) and the initial end-effector pose,
+and autoregressively generates the remaining trajectory (position, orientation,
+and grasp state) one camera-capture segment at a time.
 
-### Position error (ADE, mm)
+**Architecture.** Embedding dimension 64, 8 attention heads, 3 encoder layers and
+3 decoder layers, with a causal mask on the decoder. The encoder ingests the
+object-pose sequence (per-object 7-D pose + one-hot object tag); the decoder
+predicts the 8-D output (position, quaternion, grasp) plus an auxiliary action
+class.
+
+**Optimization.** Adam with initial LR = 1e-4, batch size 8, on PCS A100 (80 GB)
+GPUs. A single model is trained per (action, seed); the three assembly actions
+are learned independently. The training objective is a per-timestep-weighted sum
+of four terms: position (weight 1), orientation/quaternion (weight 2), grasp
+(weight 1000), and action classification (weight 100), summed over the trajectory.
+
+**Learning-rate schedule and stopping.** We use `ReduceLROnPlateau` on a
+validation metric (patience expressed in gradient steps, ≈3000, then scaled to
+epochs by batches-per-epoch so the per-K optimization budget is comparable across
+K). When the scheduler floors the learning rate at `min_lr = 1e-7`, further
+updates are negligible and training stops. The best-on-validation checkpoint is
+used for all predictions.
+
+**Model selection and scheduling metric.** The *validation* metric that drives
+(a) best-checkpoint selection, (b) the LR-scheduler step, and (c) the LR-floor
+stop is a separate design choice from the training objective, and we evaluated
+two options:
+
+- **Total loss** — the full training objective (position + orientation + grasp +
+  action), i.e. select and schedule on exactly what is optimized.
+- **Waypoint error** — the error measured only at the precision-critical
+  waypoints of the motion (the high-weight timesteps near grasp/release and slow
+  segments), rather than averaged over the whole trajectory.
+
+We found **waypoint-error selection consistently produces better accuracy than
+total-loss selection at every K**, on both ADE and NDQ. Intuitively, the critical
+waypoints are the hardest and last part of the motion to converge; selecting and
+scheduling on them keeps the learning-rate schedule active until those segments
+are actually learned, whereas the whole-trajectory total loss is dominated by the
+many easy timesteps, plateaus early, and floors the LR before the hard regions
+converge. All results in this document use waypoint-error selection; the full
+comparison is in [Appendix A](#appendix-a-model-selection-metric-ablation).
+
+---
+
+## 2. Training the baselines
+
+We compare against two classical task-parameterised movement-primitive methods
+and two deep conditional-process methods.
+
+### Classical baselines (TP-GMM, TP-ProMP)
+
+These have closed-form / EM fits with no gradient-based training loop. We use the
+standard task-parameterised formulations; the only fitted hyperparameter is the
+number of GMM components (selected per fit). TP-GMM is ill-conditioned at K = 1–2
+because EM cannot estimate stable per-component covariances from one or two
+demonstrations (see the footnote under the Experiment 2 table).
+
+### Deep baselines (CNEP, CNMP)
+
+CNEP and CNMP are adapted from the official implementation accompanying
+[Yildirim & Ugur, "Conditional Neural Expert Processes for Learning Movement
+Primitives From Demonstration", IEEE RA-L 2024](https://ieeexplore.ieee.org/abstract/document/10711283)
+([code](https://github.com/yildirimyigit/cnep), [preprint](https://arxiv.org/abs/2402.08424)).
+The model architectures (encoder / gate / expert-decoder networks), the loss
+(reconstruction NLL + batch-entropy + individual-entropy for CNEP; reconstruction
+NLL for CNMP), and the core optimizer settings (Adam, LR = 3e-4, batch size 2,
+2 experts, the entropy-loss coefficients, the `softplus(Σ)+1e-6` parametrization)
+are taken **unchanged** from that repository. The paper itself does not report
+these hyperparameters — they live only in the released code — so we inherit them
+verbatim.
+
+**What we changed to adapt CNEP/CNMP to the assembly task:**
+
+- **Hidden dimensions.** The paper does not report layer sizes and the released
+  code uses different widths across scripts (256–768) depending on the image
+  feature extractor. We adopt the values from the MobileNet reference script
+  (encoder [256, 256]; decoder [128, 128] for CNEP, [256, 256] for CNMP), the
+  closest analog since we also use 1280-D MobileNetV2 image features.
+- **Early stopping.** Upstream had none (it ran to a 5M-epoch budget). We stop
+  when validation MSE has not reached a new minimum for 50,000 epochs (the
+  5M budget is retained only as a ceiling).
+- **Deterministic validation.** Upstream picked the "best" checkpoint off a
+  single random subset of validation demos. We evaluate over all validation
+  demos in fixed order (condition on t=0, predict t=1..T-1), making selection
+  deterministic.
+- **Conditioning regime.** We train each deep baseline two ways and report both:
+  *multi-context* — the original paper's CNP-style training (random number of
+  context/target points per step, `n_max = m_max = 20`); and *single-context* —
+  an analog to how the TP-Transformer is conditioned (a single context point at
+  t=0, predict the rest), giving the baseline the same ground-truth information
+  budget the TP-Transformer has at inference. Validation and inference are
+  identical across both regimes.
+- **Correctness fixes (not tuning).** The upstream loss returns NaN when a
+  training batch contains a fully-padded slot (`0/0` in the masked NLL), which
+  happens whenever K < batch size — making K = 1 untrainable. We mask out
+  fully-padded slots (mathematically identical to upstream when no slot is
+  padded), clamp batch size ≤ K in the low-data regime, and move tensors to the
+  GPU once before the loop (a speed fix). These are required to evaluate CNEP/CNMP
+  at K = 1–2 at all.
+
+A separate model is trained per (action, seed) for the deep baselines, and the
+best-on-validation checkpoint is used for prediction.
+
+---
+
+## 3. Experiment 1 — Augmentation comparison (K = 15)
+
+Compares three augmentation regimes for the TP-Transformer, holding everything
+else (model, dataset, training schedule) fixed at K = 15 train demos per action:
+**TP-aug** (task-parameterised augmentation), **random rotation** (a naive
+geometric augmentation), and **none** (train on the raw demos with no
+augmentation). The "none" arm is the control: it tells us whether an augmentation
+helps over doing nothing.
+
+![Experiment 1 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
+
+Full per-action ADE/NDQ numbers are in [Appendix B](#appendix-b-detailed-result-tables).
+
+### Findings
+
+- **Only TP-aug improves over the no-augmentation baseline.** Ordering is TP-aug (17.7 mm) < none (26.9 mm) < random rotation (57.7 mm). TP-aug is **1.5× lower ADE** and **2.3× lower NDQ** than training with no augmentation.
+- **Naive random rotation is *worse than doing nothing*** — 2.1× higher ADE and 3.1× higher NDQ than the no-augmentation baseline. Rotating trajectories without respecting the task geometry injects training signal inconsistent with the object-pose conditioning, actively harming the model.
+- This makes the case for TP-aug stronger than a head-to-head against random rotation alone would: augmentation is **not** automatically beneficial; it helps only when it preserves the task-parameterised structure.
+- Random rotation degrades **orientation** most (16× worse than TP-aug on action_2), confirming that the geometric structure TP-aug preserves is essential for tight rotational accuracy.
+- All three arms are evaluated identically (same test demos, deterministic single forward pass per demo), so the differences reflect the training-time augmentation choice alone.
+
+### Qualitative 3D trajectories
+
+The figures below show, per action, the **training-time augmentation** (top row) and the resulting **model prediction vs. ground truth** (bottom row). Objects are drawn as squares (bolt green, nut yellow, box black, jig purple); the trajectory start is a circle and the end a cross.
+
+Top row: the raw trajectory (Ground truth / No-aug are identical), the same trajectory under **random rotation**, and under **TP-aug**. Random rotation displaces the start/end points away from their task-defined locations (the original always starts/ends at the object-relative poses), whereas TP-aug preserves that structure. Bottom row: each model's prediction (coloured) overlaid on the test ground truth (faint black) — TP-aug tracks the GT closely; random rotation drifts.
+
+![Experiment 1 — action_0 augmentation and prediction](figures/results/aug3d_action_0.png)
+
+![Experiment 1 — action_1 augmentation and prediction](figures/results/aug3d_action_1.png)
+
+![Experiment 1 — action_2 augmentation and prediction](figures/results/aug3d_action_2.png)
+
+(The random-rotation angle in the top row is fixed per action for a clear, reproducible illustration of the distribution shift; at training time the angle is sampled randomly.)
+
+---
+
+## 4. Experiment 2 — Methods × number of training demos
+
+Compares TP-Transformer against the classical baselines (TP-ProMP, TP-GMM) and
+the deep baselines (CNEP, CNMP) at K ∈ {1, 2, 5, 10, 15} demos per action. The
+valid/test demo IDs are bit-identical across K and across methods
+(reserve-eval-first sampler), so the comparison is apples-to-apples. K = 2 was
+added because TP-GMM and TP-ProMP both rely on across-demo covariance, making
+K = 1 degenerate for them; K = 2 is the cleanest minimum-data point at which all
+methods are well-defined in principle. CNEP/CNMP use the original multi-context
+CNP training regime (see §2).
+
+![Experiment 2 — ADE vs K (log scale)](figures/results/exp1_ade_log.png)
+
+![Experiment 2 — NDQ vs K](figures/results/exp1_ndq.png)
+
+Full per-K and per-action ADE/NDQ numbers are in [Appendix B](#appendix-b-detailed-result-tables).
+
+### Findings
+
+- **TP-Transformer is the best method at every (K, action, metric) cell.** At K = 1 it outperforms TP-ProMP by **3.6×** (ADE) and **5.0×** (NDQ); at K = 15 it remains **2.2×** lower ADE than TP-ProMP and **3.3×** lower than TP-GMM.
+- **TP-Transformer needs few demos.** The K=1 → K=2 jump closes most of the gap (38.4 → 26.0 mm; −32%); past K=5 the curve flattens (K=5 = 21.6, K=10 = 18.1, K=15 = 17.8).
+- **TP-GMM needs ≥ ~5 demos to be numerically stable.** At K = 1–2 it produces metre-scale predictions on action_0 due to EM collapse; K = 5 is where the mixture fit becomes well-conditioned across all actions.
+- **Classical baselines saturate or regress past K=10.** TP-ProMP and TP-GMM both fail to improve monotonically from K=10 to K=15, suggesting the model classes lack the expressiveness to use the extra demos.
+- **The deep CNP baselines (CNEP, CNMP) plateau high and barely scale with K** — ~120–130 mm at K=1, only ~87–94 mm at K=15, never approaching even TP-ProMP. They are architecturally limited for this task, not data-starved, and are worse than TP-ProMP at every K ≥ 2. (We report the original multi-context training regime; a single-context variant matched to the TP-Transformer conditioning performs comparably.)
+- **Low-data robustness is TP-Transformer's strongest comparative advantage** — the gap to baselines is largest at K=1–2 and shrinks (in relative terms) as K grows.
+
+### Qualitative 3D trajectories (K = 15)
+
+Per action, each panel shows a method's K = 15 prediction (coloured) overlaid on the test ground truth (faint black). Objects are squares (bolt green, nut yellow, box black, jig purple); the prediction start is a circle and the end a cross. TP-Transformer tracks the ground truth closely, while TP-ProMP, CNEP, and CNMP drift; TP-GMM is reasonable at K = 15 (it is the degenerate metre-scale case only at K = 1–2). CNEP/CNMP use the multi-context regime.
+
+![Experiment 2 — action_0 method predictions (K=15)](figures/results/methods3d_action_0.png)
+
+![Experiment 2 — action_1 method predictions (K=15)](figures/results/methods3d_action_1.png)
+
+![Experiment 2 — action_2 method predictions (K=15)](figures/results/methods3d_action_2.png)
+
+---
+
+## Summary
+
+| Question                                            | Result |
+|-----------------------------------------------------|--------|
+| Does TP-augmentation help over plain random rotation? | **Yes** — 3.3× lower ADE, 7.4× lower NDQ at K=15. Random rotation is *worse than no augmentation* (57.7 vs 26.9 mm); only TP-aug beats the no-aug baseline (17.7 vs 26.9 mm). |
+| How does TP-Transformer compare to classical baselines? | **Best at every K and every action**, largest margin at K=1. |
+| How does it compare to deep CNP baselines (CNEP, CNMP)? | **Best by 3–5×.** CNEP/CNMP plateau at ~87–130 mm and never beat even TP-ProMP. |
+| Is the TP-Transformer worth the added complexity? | **Yes for low-data (K ≤ 5).** Classical baselines never close the gap, even at K=15. |
+| How much data is "enough" for TP-Transformer? | **K=5** captures most of the benefit (ADE −44% from K=1 to K=5; only −18% more from K=5 to K=15). |
+
+---
+
+## Appendix A — Model-selection metric ablation
+
+All TP-Transformer runs minimize the same training objective; only the validation
+metric driving best-checkpoint selection, the LR-scheduler step, and the LR-floor
+stop differs. We compared **waypoint-error** selection (used for all reported
+numbers) against **total-loss** selection (select/schedule on the full training
+objective), holding everything else fixed (5 seeds each).
+
+Mean ADE (mm) / NDQ across actions, TP-Transformer:
+
+| K  | ADE: waypoint error | ADE: total loss | NDQ: waypoint error | NDQ: total loss |
+|----|---------------------|-----------------|---------------------|-----------------|
+| 1  | **38.4**            | 48.0            | **0.068**           | 0.100           |
+| 2  | **26.0**            | 34.8            | **0.040**           | 0.059           |
+| 5  | **21.6**            | 25.9            | **0.036**           | 0.052           |
+| 10 | **18.1**            | 24.7            | **0.028**           | 0.048           |
+| 15 | **17.8**            | 18.9            | **0.026**           | 0.039           |
+
+Waypoint-error selection is better at every K, on both ADE and NDQ. The waypoint
+error tracks the hardest, last-to-converge part of the motion (the precision
+waypoints near grasp/release and slow segments), so it keeps the LR schedule
+active until those segments converge; the whole-trajectory total loss is dominated
+by the many easy timesteps, plateaus earlier, and floors the LR before the hard
+regions are fully learned.
+
+---
+
+## Appendix B — Detailed result tables
+
+### Experiment 1 — Augmentation, position error (ADE, mm)
 
 | Action   | TP-aug         | None            | Random rotation |
 |----------|----------------|-----------------|-----------------|
@@ -26,7 +245,7 @@ Compares three augmentation regimes for the TP-Transformer, holding everything e
 | action_2 | **16.3 ± 2.7** | 20.3 ± 2.0      | 54.8 ± 8.5      |
 | **mean** | **17.7**       | 26.9            | 57.7            |
 
-### Orientation error (NDQ)
+### Experiment 1 — Augmentation, orientation error (NDQ)
 
 | Action   | TP-aug              | None                | Random rotation     |
 |----------|---------------------|---------------------|---------------------|
@@ -35,66 +254,29 @@ Compares three augmentation regimes for the TP-Transformer, holding everything e
 | action_2 | **0.016 ± 0.004**   | 0.038 ± 0.009       | 0.250 ± 0.106       |
 | **mean** | **0.026**           | 0.061               | 0.192               |
 
-### Findings
+### Experiment 2 — Methods × K, position error (ADE, mm), averaged across actions
 
-- **Only TP-aug improves over the no-augmentation baseline.** Ordering is TP-aug (17.7 mm) < none (26.9 mm) < random rotation (57.7 mm). TP-aug is **1.5× lower ADE** and **2.3× lower NDQ** than training with no augmentation.
-- **Naive random rotation is *worse than doing nothing*** — 2.1× higher ADE and 3.1× higher NDQ than the no-augmentation baseline. Rotating trajectories without respecting the task geometry injects training signal that is inconsistent with the object-pose conditioning, actively harming the model.
-- This makes the case for TP-aug much stronger than a head-to-head against random rotation alone would: augmentation is **not** automatically beneficial; it helps only when it preserves the task-parameterised structure.
-- Random rotation degrades **orientation** most (16× worse than TP-aug on action_2), confirming that the geometric structure TP-aug preserves is essential for tight rotational accuracy.
-- All three arms are evaluated identically (same test demos, same deterministic single forward pass per demo; no test-time augmentation or averaging), so the differences reflect the training-time augmentation choice alone.
+| K  | TP-Transformer | TP-ProMP | TP-GMM | CNEP  | CNMP  |
+|----|----------------|----------|--------|-------|-------|
+| 1  | **38.4**       | 139.6    | 3377†  | 129.3 | 123.6 |
+| 2  | **26.0**       | 70.4     | 1702†  | 124.0 | 116.9 |
+| 5  | **21.6**       | 45.9     | 98.1   | 119.1 | 113.3 |
+| 10 | **18.1**       | 37.5     | 63.6   | 102.0 | 100.4 |
+| 15 | **17.8**       | 39.3     | 58.6   | 93.7  | 86.8  |
 
-![Experiment 1 — TP-aug vs none vs random rotation](figures/results/exp2_augmentation.png)
+† TP-GMM at K = 1 fits a Gaussian mixture (2–50 components) to a single training trajectory per action; the EM fit collapses (zero-variance components, large extrapolation at test time) and produces metre-scale predictions on action_0 in particular. This is a known failure mode of mixture-density methods at K = 1, not a numerical bug. At K = 2 the EM still struggles on action_0 while action_1/action_2 improve.
 
-### Test-time rotation averaging (TTA)
+### Experiment 2 — Methods × K, orientation error (NDQ), averaged across actions
 
-We also tested whether test-time rotation averaging helps the random-rotation
-model: at inference, rotate the encoder object scene, predict, rotate the
-predicted trajectory back, and average over 5 rotations (matching the
-training-time random-rotation distribution).
+| K  | TP-Transformer | TP-ProMP | TP-GMM | CNEP  | CNMP  |
+|----|----------------|----------|--------|-------|-------|
+| 1  | **0.068**      | 0.338    | 0.676  | 0.130 | 0.121 |
+| 2  | **0.040**      | 0.078    | 0.444  | 0.121 | 0.118 |
+| 5  | **0.036**      | 0.095    | 0.096  | 0.113 | 0.112 |
+| 10 | **0.028**      | 0.038    | 0.087  | 0.111 | 0.108 |
+| 15 | **0.026**      | 0.041    | 0.083  | 0.108 | 0.102 |
 
-| Model                       | mean ADE (mm) | mean NDQ |
-|-----------------------------|---------------|----------|
-| Random rotation (no TTA)    | 57.7          | 0.192    |
-| Random rotation + TTA (×5)  | 77.9          | 0.192    |
-
-TTA makes position error **worse** (57.7 → 77.9 mm) and leaves orientation
-unchanged. The model trained with random rotation is not rotation-equivariant —
-feeding it a rotated scene and rotating the output back does not reproduce the
-unrotated prediction (round-trip position difference ≈ 50 mm on average) — so
-averaging over rotations blends inconsistent trajectories rather than denoising
-them. TTA is therefore not used for the reported numbers.
-
----
-
-## Experiment 2 — Methods × number of training demos
-
-Compares TP-Transformer against two classical task-parameterised baselines (TP-ProMP and TP-GMM) at K ∈ {1, 2, 5, 10, 15} demos per action. The valid/test demo IDs are bit-identical across K and across methods (reserve-eval-first sampler), so the comparison is apples-to-apples. K=2 was added because TP-GMM and TP-ProMP both rely on across-demo covariance, making K=1 degenerate for them; K=2 is the cleanest minimum-data point at which all three methods are well-defined in principle.
-
-### Position error (ADE, mm) — averaged across actions
-
-CNEP/CNMP are shown for both training regimes: **sc** = single-context, **mc** = multi-context (see [Baseline training details](#deep-baselines-cnep-cnmp)).
-
-| K  | TP-Transformer | TP-ProMP | TP-GMM | CNEP-sc | CNEP-mc | CNMP-sc | CNMP-mc |
-|----|----------------|----------|--------|---------|---------|---------|---------|
-| 1  | **38.4**       | 139.6    | 3377†  | 128.5   | 129.3   | 124.5   | 123.6   |
-| 2  | **26.0**       | 70.4     | 1702†  | 125.1   | 124.0   | 110.5   | 116.9   |
-| 5  | **21.6**       | 45.9     | 98.1   | 120.4   | 119.1   | 107.3   | 113.3   |
-| 10 | **18.1**       | 37.5     | 63.6   | 111.2   | 102.0   | 104.2   | 100.4   |
-| 15 | **17.8**       | 39.3     | 58.6   | 96.7    | 93.7    | 93.0    | 86.8    |
-
-† TP-GMM at K=1 fits a Gaussian-mixture with 2–50 components to a single training trajectory per action; the EM fit collapses (zero-variance components, large extrapolation at test time) and produces predictions on the order of metres on action_0 in particular. This is a known failure mode of mixture-density methods at K=1, not a numerical bug. We report the number for completeness. At K=2 the EM still struggles on action_0 (mean ADE ≈ 4.7 m across seeds) while action_1/action_2 improve roughly 8× and 1.4× respectively over K=1.
-
-### Orientation error (NDQ) — averaged across actions
-
-| K  | TP-Transformer | TP-ProMP | TP-GMM | CNEP-sc | CNEP-mc | CNMP-sc | CNMP-mc |
-|----|----------------|----------|--------|---------|---------|---------|---------|
-| 1  | **0.068**      | 0.338    | 0.676  | 0.139   | 0.130   | 0.120   | 0.121   |
-| 2  | **0.040**      | 0.078    | 0.444  | 0.138   | 0.121   | 0.113   | 0.118   |
-| 5  | **0.036**      | 0.095    | 0.096  | 0.112   | 0.113   | 0.108   | 0.112   |
-| 10 | **0.028**      | 0.038    | 0.087  | 0.106   | 0.111   | 0.105   | 0.108   |
-| 15 | **0.026**      | 0.041    | 0.083  | 0.108   | 0.108   | 0.105   | 0.102   |
-
-### Per-action ADE detail
+### Experiment 2 — Per-action ADE detail (mm)
 
 | Method          | Action   | K=1               | K=2              | K=5              | K=10             | K=15             |
 |-----------------|----------|-------------------|------------------|------------------|------------------|------------------|
@@ -108,176 +290,7 @@ CNEP/CNMP are shown for both training regimes: **sc** = single-context, **mc** =
 | TP-GMM          | action_1 | 1957 ± 505        | 253.8 ± 31.4     | 92.2 ± 33.0      | 64.3 ± 9.9       | 66.4 ± 13.2      |
 | TP-GMM          | action_2 | 149.7 ± 101.8     | 104.6 ± 20.8     | 44.2 ± 7.3       | 38.4 ± 3.4       | 33.6 ± 1.6       |
 
-### Findings
-
-- **TP-Transformer is the best method at every (K, action, metric) cell.**
-  - At K=1 it outperforms TP-ProMP by **3.6×** (ADE) and **5.0×** (NDQ); the TP-GMM gap is much larger.
-  - At K=2 it remains **2.7×** lower ADE than TP-ProMP and ~65× lower than TP-GMM (TP-GMM still has a degenerate action_0 fit even with two demos).
-  - At K=15 it remains **2.2×** lower ADE than TP-ProMP and **3.3×** lower than TP-GMM.
-
-- **TP-Transformer requires few demos to be effective.** The K=1 → K=2 jump alone closes most of the gap (38.4 → 26.0 mm; −32%); past K=5 the curve flattens (K=5 = 21.6, K=10 = 18.1, K=15 = 17.8).
-
-- **TP-GMM needs at least ~5 demos to be numerically stable.** At K=1 and K=2 it produces metre-scale predictions on action_0 due to EM collapse; K=5 is the point at which the mixture fit becomes well-conditioned across all actions.
-
-- **Classical baselines saturate or even regress past K=10.** TP-ProMP and TP-GMM both fail to monotonically improve from K=10 to K=15. Suggests the model classes lack expressiveness to use the additional demos; TP-Transformer keeps a small but consistent edge.
-
-- **The deep CNP-family baselines (CNEP, CNMP) plateau high and barely scale with K.** Across both training regimes they sit at ~120–130 mm mean ADE at K=1 and only reach ~87–97 mm at K=15 — never approaching even TP-ProMP (39 mm at K=15), let alone TP-Transformer (18 mm). They are not data-starved; they are architecturally limited for this task. Notably they are **worse than the classical TP-ProMP at every K ≥ 2**, indicating that a generic image-conditioned CNP does not exploit the task structure as effectively as the task-parameterised methods.
-
-- **single-context vs multi-context training is roughly a wash for CNEP/CNMP**, with multi-context marginally better at high K (e.g. CNMP K=15: 86.8 mc vs 93.0 sc mm). The implicit data augmentation from random observation sampling helps slightly once there are enough demos, but does not change the qualitative picture.
-
-- **Low-data robustness is TP-Transformer's strongest comparative advantage.** The gap to baselines is **largest at K=1–2** and *decreases* (in relative terms) as K grows. For applications where collecting demos is expensive, TP-Transformer dominates.
-
-![Experiment 2 — ADE vs K (linear, capped at 200 mm)](figures/results/exp1_ade_linear.png)
-
-(The linear plot caps at 200 mm so TP-GMM K=1 doesn't compress the rest of the panel; see log-scale variant below.)
-
-![Experiment 2 — ADE vs K (log scale)](figures/results/exp1_ade_log.png)
-
-![Experiment 2 — NDQ vs K](figures/results/exp1_ndq.png)
-
 ---
-
-## Baseline training details
-
-### Classical baselines (TP-GMM, TP-ProMP)
-
-These have closed-form / EM fits with no gradient-based training loop. We use the
-standard task-parameterised formulations; the only fitted hyperparameter is the
-number of GMM components (selected per fit). TP-GMM is ill-conditioned at K=1–2
-(see the footnote under the ADE table) because EM cannot estimate stable
-per-component covariances from one or two demonstrations.
-
-### Deep baselines (CNEP, CNMP)
-
-CNEP and CNMP are adapted from the official implementation accompanying
-[Yildirim & Ugur, "Conditional Neural Expert Processes for Learning Movement
-Primitives From Demonstration", IEEE RA-L 2024](https://ieeexplore.ieee.org/abstract/document/10711283)
-([code](https://github.com/yildirimyigit/cnep), [preprint](https://arxiv.org/abs/2402.08424)).
-The model architectures (encoder / gate / expert-decoder networks), the loss
-(reconstruction NLL + batch-entropy + individual-entropy for CNEP; reconstruction
-NLL for CNMP), and the core optimizer settings are taken unchanged from that
-repository. We list below which settings were inherited and which we set for the
-assembly task, to make the comparison reproducible and to be explicit about
-deviations.
-
-**Inherited from the upstream repository (unchanged):**
-
-| Hyperparameter | Value | Source |
-|----------------|-------|--------|
-| Optimizer | Adam | upstream default |
-| Learning rate | 3e-4 | upstream default |
-| Batch size | 2 | upstream default |
-| CNEP experts (decoders) | 2 | upstream default |
-| Loss coefficients (CNEP) | `nll=16.81`, `batch_entropy=10.672`, `ind_entropy=7.553`, `scale_coefs=True` | upstream (W&B grid-search values; not reported in the paper, only in code) |
-| Std parametrization | `softplus(Σ) + 1e-6` | upstream default |
-| Validation cadence | every 1000 epochs | upstream default |
-| Best-on-validation checkpoint | yes | upstream behaviour |
-
-The paper itself does not specify learning rate, optimizer, batch size, epoch
-budget, or the entropy-loss coefficients (it states only that the coefficients
-were "found empirically by grid search using Weights & Biases"); these live solely
-in the released code, and we inherit them verbatim.
-
-**Set by us for the assembly task:**
-
-| Hyperparameter | Value | Rationale |
-|----------------|-------|-----------|
-| Encoder hidden dims | [256, 256] | matches the upstream MobileNet reference script (`train_cnep_with_mobilenet_v2.py`), the closest analog since we also use 1280-D MobileNetV2 image features |
-| Decoder hidden dims | CNEP [128, 128] / CNMP [256, 256] | matches the same reference script (CNEP and CNMP use different decoder widths upstream) |
-| Epoch budget | 5,000,000 (matches upstream default) | effectively a ceiling; runs end via early stopping well before this |
-| Early stopping | patience = 50,000 epochs on validation MSE | upstream had **no** early stopping (ran to the full budget); we stop when val MSE has not reached a new minimum for 50k epochs. Improvement is threshold-free (any strict decrease resets patience), consistent with the best-checkpoint rule. |
-| Validation metric | full-trajectory MSE: condition on t=0, predict t=1..T-1 over all validation demos in fixed order | deterministic; replaces upstream's noisy random-subset validation, which picked "best" off a single random snapshot |
-| Conditioning regime | two variants compared (see below) | — |
-
-Note on hidden dimensions: there is no single "original" width to inherit — the
-paper states layer sizes are set empirically and does not report them, and the
-released code uses different widths across scripts (256–768) depending on the
-image feature extractor. We adopt the values from the MobileNet reference script
-(the closest analog to our setup), since both use 1280-D MobileNetV2 features.
-Hidden width is exposed as a CLI flag (`--encoder-dims` / `--decoder-dims`) so a
-capacity ablation can be run later; an earlier 512-wide run is archived for that
-comparison.
-
-**Two training regimes compared (`single-context` vs `multi-context`).** The CNP
-family is trained by conditioning on a set of observation (context) points and
-predicting at target timepoints. Both TP-Transformer and these deep baselines
-ultimately condition on the **scene** (object poses for TP-Transformer; MobileNetV2
-image features for CNEP/CNMP — two encodings of the same scene information) plus
-the **initial pose**, and generate the rest of the trajectory. We train CNEP/CNMP
-two ways:
-
-- **multi-context** — the **original paper's** CNP-style training: each step samples
-  a random number of context points `n ∈ [1, n_max)` and target points
-  `m ∈ [1, m_max)` (`n_max = m_max = 20`) at random timesteps. This is the faithful
-  reproduction of the published method and provides implicit data augmentation.
-- **single-context** — an analog to **how TP-Transformer is trained/deployed**:
-  condition on a single context point at `t=0` and predict the entire remaining
-  trajectory (`t=1..T-1`). This gives the baseline the same ground-truth
-  information budget TP-Transformer has at inference (scene + start pose, then
-  generate the rest), rather than the extra random intermediate observations the
-  multi-context regime sees during training.
-
-Validation and inference are **identical** across both regimes (condition on `t=0`,
-predict `t=1..T-1`, over all val/test demos), so the two are evaluated on exactly
-the same task and differ only in their training-time conditioning. In both regimes
-a separate model is trained per `(action, seed)` and the best-on-validation
-checkpoint is used for prediction.
-
-**Bug fixes applied to the upstream code (correctness, not tuning).** The upstream
-loss returns NaN whenever a training batch contains a fully-padded slot
-(`0/0` in the masked NLL), which occurs whenever `K < batch_size` — i.e. at K=1
-and, with the default batch size, made low-data training impossible. We mask out
-fully-padded slots before averaging; when no slots are padded the computation is
-mathematically identical to upstream. We also clamp `batch_size ≤ K` in the
-low-data regime and move tensors to the GPU once before the loop (a performance
-fix). These changes are required to evaluate CNEP/CNMP at K=1–2 at all and do not
-alter the loss formulation.
-
----
-
-## Model-selection metric (TP-Transformer)
-
-All TP-Transformer runs minimize the same training objective
-(`pos + ori + grasp + action`, weighted, over the whole trajectory). The choice
-of *validation* metric that drives best-checkpoint selection, the LR-scheduler
-step, and the LR-floor early-stop is a separate design decision. We compared two
-options, holding everything else fixed (5 seeds each):
-
-- **important_dist** (used for all reported numbers): the L2 error evaluated only
-  at the high-weight grasp/critical waypoints.
-- **total_loss**: the full training objective (`pos + ori + grasp + action`),
-  i.e. select/schedule on exactly what is optimized.
-
-Mean ADE (mm) / NDQ across actions, TP-Transformer:
-
-| K  | ADE: important_dist | ADE: total_loss | NDQ: important_dist | NDQ: total_loss |
-|----|---------------------|-----------------|---------------------|-----------------|
-| 1  | **38.4**            | 48.0            | **0.068**           | 0.100           |
-| 2  | **26.0**            | 34.8            | **0.040**           | 0.059           |
-| 5  | **21.6**            | 25.9            | **0.036**           | 0.052           |
-| 10 | **18.1**            | 24.7            | **0.028**           | 0.048           |
-| 15 | **17.8**            | 18.9            | **0.026**           | 0.039           |
-
-**important_dist is the better selection signal at every K**, on both ADE and
-NDQ. The reason is that it tracks the hardest, last-to-converge part of the
-motion — the grasp/critical waypoints — so it keeps registering improvement (and
-keeps the LR scheduler from flooring) until those precision-critical segments
-have actually converged. The whole-trajectory `total_loss` is dominated by the
-many easy bulk timesteps, plateaus earlier, and floors the learning rate before
-the hard regions are fully learned, yielding a worse final model. We therefore
-select on `important_dist` for all reported results.
-
----
-
-## Summary
-
-| Question                                            | Result |
-|-----------------------------------------------------|--------|
-| Does TP-augmentation help over plain random rotation? | **Yes** — 3.3× lower ADE, 7.4× lower NDQ at K=15. And random rotation is *worse than no augmentation* (57.7 vs 26.9 mm), so only TP-aug beats the no-aug baseline (17.7 vs 26.9 mm). |
-| How does TP-Transformer compare to classical baselines? | **Best at every K and every action**, with the largest margin at K=1. |
-| How does it compare to deep CNP baselines (CNEP, CNMP)? | **Best by 3–5×.** CNEP/CNMP plateau at ~87–130 mm and never beat even TP-ProMP; training regime (single- vs multi-context) barely matters. |
-| Is the TP-Transformer worth the added complexity? | **Yes for low-data (K ≤ 5).** Classical baselines never close the gap, even at K=15. |
-| How much data is "enough" for TP-Transformer? | **K=5** captures most of the benefit; ADE drops 32% from K=1→K=2 and 44% from K=1→K=5; only 18% more from K=5 to K=15. |
 
 ## Reproducing
 
@@ -286,24 +299,8 @@ The data, splits manifests, and trained checkpoints needed to regenerate every n
 - Repo: `https://github.com/x35yao/TP-Transformer-assembly` (private)
 - Splits: `data/splits/n{1,2,5,10,15}_v3t3.yaml` (5 seeds each, reserve-eval-first sampler)
 - Pickles: `baselines/data/baseline_dataset_n{1,2,5,10,15}_v3t3.pickle`
-- Trained checkpoints: `/shared/$USER/RingAIAutoAnnotation/eval/{exp1,exp2}/...`
-- Result CSVs: `/shared/$USER/RingAIAutoAnnotation/eval/results/{exp1,exp2}/...`
+- Trained checkpoints and result CSVs: `/shared/$USER/RingAIAutoAnnotation/eval/...`
 
-To reproduce evaluation from the trained checkpoints:
-
-```bash
-sbatch scripts/slurm/predict_exp2.sbatch     # TP-Transformer test-set inference (10 cells, exp2)
-sbatch scripts/slurm/predict_exp1.sbatch     # TP-Transformer test-set inference (25 cells, exp1)
-sbatch scripts/slurm/evaluate_exp2.sbatch    # CSV summary for exp2
-sbatch scripts/slurm/evaluate_exp1.sbatch    # CSV summary for exp1 (one per K)
-```
-
-To train the CNEP/CNMP deep baselines (one model per action × seed; 5 K × 5 seeds
-= 25 array tasks per job; each job is one method × sampling regime):
-
-```bash
-sbatch scripts/slurm/exp1_cnep_fixed.sbatch    # CNEP, single-context (condition on t=0 -> predict t=1..T-1)
-sbatch scripts/slurm/exp1_cnep_random.sbatch   # CNEP, multi-context (upstream CNP-style random sampling)
-sbatch scripts/slurm/exp1_cnmp_fixed.sbatch    # CNMP, single-context
-sbatch scripts/slurm/exp1_cnmp_random.sbatch   # CNMP, multi-context
-```
+Note on directory naming: the on-disk `eval/exp1/` and `eval/exp2/` folders predate
+the experiment renumbering in this document — `eval/exp2/` holds the augmentation
+(Experiment 1) runs and `eval/exp1/` holds the K-sweep (Experiment 2) runs.

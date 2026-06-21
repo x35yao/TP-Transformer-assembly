@@ -41,9 +41,9 @@ DEEP_REGIMES = ["multi", "single"]   # subdir names: results/exp1_deep/<regime>/
 DEEP_REGIME_DIR = {"multi": "random", "single": "fixed"}  # on-disk dir names
 COLORS = {
     "TP-Transformer": "#1f77b4",
-    "TP-ProMP":       "#2ca02c",
-    "TP-GMM":         "#d62728",
-    "CNEP":           "#9467bd",
+    "TP-GMM":         "#2ca02c",
+    "TP-ProMP":       "#9467bd",
+    "CNEP":           "#17becf",
     "CNMP":           "#ff7f0e",
     "TP-aug":         "#1f77b4",
     "No-aug":         "#2ca02c",

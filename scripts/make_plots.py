@@ -160,9 +160,25 @@ def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = 
         if not log_scale:
             ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(loc="upper right", framealpha=0.9)
     fig.tight_layout()
+    out = FIG_DIR / fname
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out}")
+
+
+def plot_exp1_legend(fname: str = "exp1_methods_legend.png"):
+    """Standalone horizontal legend strip for the K-sweep method curves."""
+    from matplotlib.lines import Line2D
+    methods = ["TP-Transformer", "TP-GMM", "TP-ProMP", "CNEP", "CNMP"]
+    handles = [
+        Line2D([], [], color=COLORS[m], lw=2.0, marker="o", label=m)
+        for m in methods
+    ]
+    fig = plt.figure(figsize=(12, 0.6))
+    fig.legend(handles=handles, loc="center", ncol=len(methods), frameon=False,
+               fontsize=15, handletextpad=0.5, columnspacing=1.6)
     out = FIG_DIR / fname
     fig.savefig(out, dpi=200, bbox_inches="tight")
     fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")
@@ -222,6 +238,8 @@ if __name__ == "__main__":
     plot_exp1_curve(0, "ADE (mm)", "exp1_ade_log.png", log_scale=True)
     # NDQ
     plot_exp1_curve(1, "NDQ", "exp1_ndq.png", log_scale=False)
+    # Shared legend (curves no longer carry an in-plot legend).
+    plot_exp1_legend()
 
     print("\n=== Augmentation bar chart ===")
     plot_exp2_bar()

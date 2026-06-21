@@ -1,17 +1,22 @@
-"""2x3 3D trajectory figure for the augmentation experiment, per action.
+"""Per-(subtask, row, arm) bare 3D panels for the augmentation experiment.
 
-Columns: [No-aug, Random rotation, TP-aug]
-Reference (shaded red) is shown in every panel.
-Row 1 (Training trajectory): reference = the raw (unaugmented) demo; the arm
-       line is the trajectory the model trains on (no-aug = raw; random/tp =
-       the augmented demo). Shows how augmentation displaces the data.
-Row 2 (Prediction): reference = the test GT; the arm line is that arm's model
-       prediction. Shows test-time quality.
+Emits one bare PNG/EPS per panel so the 2x3-per-subtask grids can be arranged
+freely in LaTeX (column headers = arms, row labels = train/pred, added in
+LaTeX), plus a single shared legend image.
 
-Uses the important_dist (reported) models. For each action we pick the
-(seed, demo) test cell where TP-aug is most representative (lowest ADE).
+Each panel shows a gray dashed reference (original demo for the training row,
+test GT for the prediction row) plus the arm line, coloured by type:
+  training row -> augmented demo in red
+  prediction row -> prediction in blue
+Objects are squares (bolt green, nut yellow, bin black, jig purple);
+start = circle, end = cross.
 
-Output: figures (per action) under results/figures/aug3d_<action>.png
+Uses the important_dist (reported) models; the (seed, demo) cell per subtask
+is the one where TP-aug is most representative (lowest ADE).
+
+Outputs (results/figures/):
+  aug3d_<action>_<row>_<arm>.{png,eps}   18 bare panels (3 actions x 2 rows x 3 arms)
+  aug3d_legend.{png,eps}                 one shared legend strip
 """
 import os, sys, pickle
 from pathlib import Path
@@ -20,6 +25,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D  # noqa
 
 sys.path.insert(0, "src")
@@ -109,6 +115,28 @@ def rotate_for_display(traj_mm, objs_mm, deg):
     return rot(traj_mm), rot(objs_mm)
 
 
+ARM_FNAME = {"No-aug": "none", "Random rotation": "random", "TP-aug": "tp"}
+
+
+def _draw_panel(ax, ref, traj, objs, obj_order, arm_color, lo, hi):
+    """Draw one bare 3D panel: gray dashed reference + arm line + objects."""
+    ax.plot(*ref.T, color=REF_COLOR, lw=2.0, ls="--", alpha=0.9, zorder=2)
+    if traj is not None:
+        ax.plot(*traj.T, color=arm_color, lw=2.5, zorder=3)
+        ax.scatter(*traj[0], color=arm_color, s=70, marker="o", edgecolor="k", zorder=5)
+        ax.scatter(*traj[-1], color=arm_color, s=90, marker="x", linewidths=2.5, zorder=5)
+    for i, nm in enumerate(obj_order):
+        ax.scatter(*objs[i], color=OBJ_COLOR[nm], s=70, marker="s", edgecolor="k", zorder=7)
+    ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1]); ax.set_zlim(lo[2], hi[2])
+    ax.view_init(**VIEW)
+    ax.set_box_aspect((1.0, 1.0, 0.45))
+    ax.set_xticklabels([]); ax.set_yticklabels([]); ax.set_zticklabels([])
+    ax.tick_params(length=0)
+    ax.set_xlabel("x (mm)", fontsize=15, labelpad=-8)
+    ax.set_ylabel("y (mm)", fontsize=15, labelpad=-8)
+    ax.set_zlabel("z (mm)", fontsize=15, labelpad=-8)
+
+
 def make_fig(action, action_idx):
     si, seed, demo = best_cell(action, action_idx)
     e = dset[action][si]
@@ -116,17 +144,15 @@ def make_fig(action, action_idx):
     gt = np.asarray(e["test_traj_global"])[demo][:, :3] * std + mean
     gt_objs = np.asarray(e["HTs_test"])[demo, :4, :3, 3] * std + mean
 
-    # row 1: training augmentation (seed-matched). The reference is the raw
-    # (unaugmented) demo; each arm shows the trajectory the model trains on.
+    # Training row: reference = raw (unaugmented) demo; arm = the trajectory the
+    # model trains on (red).
     raw = train_traj_objs("none", seed, action_idx)
-    r1_ref = raw[0]                                  # original-demo reference (T,3)
-    r1 = {}
-    r1["No-aug"] = raw
-    r1["TP-aug"] = train_traj_objs("tp", seed, action_idx)
+    r1_ref = raw[0]
+    r1 = {"No-aug": raw, "TP-aug": train_traj_objs("tp", seed, action_idx)}
     rt, ro = rotate_for_display(raw[0], raw[1], RANDOM_ROT_DEG[action_idx])
     r1["Random rotation"] = (rt, ro)
 
-    # row 2: predictions; the reference is the test GT.
+    # Prediction row: reference = test GT; arm = prediction (blue).
     r2_ref = gt
     r2 = {}
     for col, arm in [("No-aug", "none"), ("Random rotation", "random"), ("TP-aug", "tp")]:
@@ -134,7 +160,6 @@ def make_fig(action, action_idx):
         arr = _to_3d(np.asarray(pickle.load(open(p, "rb"))[action]))
         r2[col] = (arr[demo][:, :3] * std + mean, gt_objs)
 
-    # shared limits per row (include the reference + all arms + objects)
     def limits(rowdata, ref):
         allpts = ([ref] + [t for (t, _) in rowdata.values() if t is not None]
                   + [o for (_, o) in rowdata.values()])
@@ -143,64 +168,51 @@ def make_fig(action, action_idx):
         pad = (hi - lo) * 0.02 + 1
         return lo - pad, hi + pad
 
-    fig = plt.figure(figsize=(14, 9))
-    fig.subplots_adjust(left=0.03, right=0.99, top=0.95, bottom=0.07, wspace=0.0, hspace=0.0)
-    rows = [("Training trajectory", r1, r1_ref, DATASET_OBJ_ORDER, limits(r1, r1_ref)),
-            ("Prediction (test)", r2, r2_ref, HTS_OBJ_ORDER, limits(r2, r2_ref))]
-    for r, (label, rowdata, ref, obj_order, lim) in enumerate(rows):
-        lo, hi = lim
-        for c, col in enumerate(COLS):
-            ax = fig.add_subplot(2, 3, r * 3 + c + 1, projection="3d")
+    rows = [("train", r1, r1_ref, DATASET_OBJ_ORDER, AUG_COLOR, limits(r1, r1_ref)),
+            ("pred", r2, r2_ref, HTS_OBJ_ORDER, PRED_COLOR, limits(r2, r2_ref))]
+    for row_name, rowdata, ref, obj_order, arm_color, (lo, hi) in rows:
+        for col in COLS:
             traj, objs = rowdata[col]
-            # Reference (gray dashed) shown in every panel.
-            ax.plot(*ref.T, color=REF_COLOR, lw=2.0, ls="--", alpha=0.9, zorder=2,
-                    label=("Reference" if (r == 0 and c == 0) else None))
-            if traj is not None:
-                tcol = AUG_COLOR if r == 0 else PRED_COLOR
-                ax.plot(*traj.T, color=tcol, lw=2.0, zorder=3)
-                ax.scatter(*traj[0], color=tcol, s=70, marker="o", edgecolor="k", zorder=5)
-                ax.scatter(*traj[-1], color=tcol, s=90, marker="x", linewidths=2.5, zorder=5)
-                if r == 0 and c == 0:
-                    ax.scatter([], [], color="grey", s=70, marker="o", edgecolor="k", label="start")
-                    ax.scatter([], [], color="grey", s=90, marker="x", linewidths=2.5, label="end")
-            for i, nm in enumerate(obj_order):
-                ax.scatter(*objs[i], color=OBJ_COLOR[nm], s=60, marker="s", edgecolor="k",
-                           label=(nm if (r == 0 and c == 0) else None))
-            ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1]); ax.set_zlim(lo[2], hi[2])
-            ax.view_init(**VIEW)
-            ax.set_box_aspect((1.0, 1.0, 0.45))
-            ax.set_xticklabels([]); ax.set_yticklabels([]); ax.set_zticklabels([])
-            ax.tick_params(length=0)
-            ax.set_xlabel("x (mm)", fontsize=15, labelpad=-8)
-            ax.set_ylabel("y (mm)", fontsize=15, labelpad=-8)
-            ax.set_zlabel("z (mm)", fontsize=15, labelpad=-8)
-            if r == 0:
-                ax.set_title(col, fontsize=20, pad=4)
-            if c == 0:
-                ax.text2D(-0.08, 0.5, label, transform=ax.transAxes, rotation=90,
-                          va="center", fontsize=20, fontweight="bold")
-    # Legend along the bottom. Build explicit proxies so both trajectory types
-    # (augmented = red, prediction = blue) are explained alongside the reference.
-    from matplotlib.lines import Line2D
-    handles, labels = fig.axes[0].get_legend_handles_labels()
-    proxies = [
+            fig = plt.figure(figsize=(6, 5))
+            ax = fig.add_subplot(111, projection="3d")
+            _draw_panel(ax, ref, traj, objs, obj_order, arm_color, lo, hi)
+            fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
+            out = OUT / f"aug3d_{action}_{row_name}_{ARM_FNAME[col]}.png"
+            fig.savefig(out, dpi=200, bbox_inches="tight")
+            fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")
+            plt.close(fig)
+            print(f"wrote {out}  (seed {seed}, demo {demo})")
+
+
+def make_legend():
+    """One shared horizontal legend strip for the 18-panel augmentation grid."""
+    handles = [
         Line2D([], [], color=REF_COLOR, lw=2.0, ls="--", label="Reference (GT)"),
-        Line2D([], [], color=AUG_COLOR, lw=2.0, label="Augmented demo"),
-        Line2D([], [], color=PRED_COLOR, lw=2.0, label="Prediction"),
+        Line2D([], [], color=AUG_COLOR, lw=2.5, label="Augmented demo"),
+        Line2D([], [], color=PRED_COLOR, lw=2.5, label="Prediction"),
+        Line2D([], [], color="none", marker="o", markerfacecolor="0.7",
+               markeredgecolor="k", markersize=9, label="start"),
+        Line2D([], [], color="none", marker="x", markeredgecolor="0.3",
+               markeredgewidth=2.0, markersize=9, label="end"),
+        Line2D([], [], color="none", marker="s", markerfacecolor=OBJ_COLOR["bolt"],
+               markeredgecolor="k", markersize=11, label="bolt"),
+        Line2D([], [], color="none", marker="s", markerfacecolor=OBJ_COLOR["nut"],
+               markeredgecolor="k", markersize=11, label="nut"),
+        Line2D([], [], color="none", marker="s", markerfacecolor=OBJ_COLOR["bin"],
+               markeredgecolor="k", markersize=11, label="bin"),
+        Line2D([], [], color="none", marker="s", markerfacecolor=OBJ_COLOR["jig"],
+               markeredgecolor="k", markersize=11, label="jig"),
     ]
-    # Drop the auto "Reference" entry (replaced by the explicit proxy) but keep
-    # start/end + object handles.
-    keep = [(h, l) for h, l in zip(handles, labels) if l not in ("Reference",)]
-    handles = proxies + [h for h, _ in keep]
-    labels = [p.get_label() for p in proxies] + [l for _, l in keep]
-    fig.legend(handles, labels, loc="lower center", fontsize=18, ncol=9,
-               frameon=False, bbox_to_anchor=(0.5, 0.0))
-    out = OUT / f"aug3d_{action}.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig = plt.figure(figsize=(15, 0.6))
+    fig.legend(handles=handles, loc="center", ncol=len(handles), frameon=False,
+               fontsize=15, handletextpad=0.4, columnspacing=1.3)
+    out = OUT / "aug3d_legend.png"
+    fig.savefig(out, dpi=200, bbox_inches="tight")
     fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")
     plt.close(fig)
-    print(f"wrote {out}  (seed {seed}, demo {demo})")
+    print(f"wrote {out}")
 
 
 for ai, action in enumerate(["action_0", "action_1", "action_2"]):
     make_fig(action, ai)
+make_legend()

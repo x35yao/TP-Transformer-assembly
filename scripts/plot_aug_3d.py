@@ -1,15 +1,15 @@
-"""2x4 3D trajectory figure for the augmentation experiment, per action.
+"""2x3 3D trajectory figure for the augmentation experiment, per action.
 
-Columns: [Ground truth, No-aug, Random rotation, TP-aug]
-Row 1 (Training trajectory): the (augmented) training trajectory each method
-       trains on. GT/No-aug = raw training demo; Random/TP-aug apply the real
-       training-time augmentation. Objects move with the augmentation.
-Row 2 (Prediction): each method's prediction (colour) overlaid on the test GT
-       (faint black) in the same panel, with shared axis limits + fixed view.
+Columns: [No-aug, Random rotation, TP-aug]
+Reference (shaded red) is shown in every panel.
+Row 1 (Training trajectory): reference = the raw (unaugmented) demo; the arm
+       line is the trajectory the model trains on (no-aug = raw; random/tp =
+       the augmented demo). Shows how augmentation displaces the data.
+Row 2 (Prediction): reference = the test GT; the arm line is that arm's model
+       prediction. Shows test-time quality.
 
 Uses the important_dist (reported) models. For each action we pick the
-(seed, demo) test cell where TP-aug is most representative (lowest ADE) so the
-figure reflects the reported quality rather than a worst-case demo.
+(seed, demo) test cell where TP-aug is most representative (lowest ADE).
 
 Output: figures (per action) under results/figures/aug3d_<action>.png
 """
@@ -44,9 +44,14 @@ OBJ_COLOR = {"bolt": "#2ca02c", "nut": "#e8d100", "bin": "#000000", "jig": "#946
 #     sorts the object list), i.e. [bin, bolt, jig, nut].
 DATASET_OBJ_ORDER = ["bolt", "nut", "bin", "jig"]
 HTS_OBJ_ORDER = ["bin", "bolt", "jig", "nut"]
-COLS = ["Ground truth", "No-aug", "Random rotation", "TP-aug"]
-PRED_COLOR = {"Ground truth": "#000000", "No-aug": "#2ca02c",
-              "Random rotation": "#ff7f0e", "TP-aug": "#1f77b4"}
+COLS = ["No-aug", "Random rotation", "TP-aug"]
+# Trajectory colours encode the *type* of line (not the column):
+#   reference  = gray dashed (original demo in row 1 / test GT in row 2)
+#   row 1 arm  = red   (the augmented training trajectory)
+#   row 2 arm  = blue  (the model prediction)
+REF_COLOR = "#808080"     # gray, dashed
+AUG_COLOR = "#d62728"     # red  -- augmented training trajectory (row 1)
+PRED_COLOR = "#1f77b4"    # blue -- prediction (row 2)
 VIEW = dict(elev=22, azim=-60)
 
 dset = pickle.load(open(DATA, "rb"))
@@ -111,70 +116,59 @@ def make_fig(action, action_idx):
     gt = np.asarray(e["test_traj_global"])[demo][:, :3] * std + mean
     gt_objs = np.asarray(e["HTs_test"])[demo, :4, :3, 3] * std + mean
 
-    # row 1: training augmentation (seed-matched)
-    # GT and No-aug use the raw (unaugmented) trajectory. TP-aug uses the real
-    # TP augmentation. Random uses a fixed, clearly-visible rotation of the raw
-    # trajectory (illustrative) so the start/end displacement is obvious.
-    r1 = {}
+    # row 1: training augmentation (seed-matched). The reference is the raw
+    # (unaugmented) demo; each arm shows the trajectory the model trains on.
     raw = train_traj_objs("none", seed, action_idx)
-    r1["Ground truth"] = raw
+    r1_ref = raw[0]                                  # original-demo reference (T,3)
+    r1 = {}
     r1["No-aug"] = raw
     r1["TP-aug"] = train_traj_objs("tp", seed, action_idx)
     rt, ro = rotate_for_display(raw[0], raw[1], RANDOM_ROT_DEG[action_idx])
     r1["Random rotation"] = (rt, ro)
 
-    # row 2: predictions overlaid on test GT
-    r2 = {"Ground truth": (gt, gt_objs)}
+    # row 2: predictions; the reference is the test GT.
+    r2_ref = gt
+    r2 = {}
     for col, arm in [("No-aug", "none"), ("Random rotation", "random"), ("TP-aug", "tp")]:
         p = IMP / arm / str(seed) / "predictions.pickle"
         arr = _to_3d(np.asarray(pickle.load(open(p, "rb"))[action]))
         r2[col] = (arr[demo][:, :3] * std + mean, gt_objs)
 
-    # shared limits per row (so panels are comparable)
-    def limits(rowdata):
-        allpts = np.vstack([t for (t, _) in rowdata.values() if t is not None]
-                           + [o for (_, o) in rowdata.values()])
+    # shared limits per row (include the reference + all arms + objects)
+    def limits(rowdata, ref):
+        allpts = ([ref] + [t for (t, _) in rowdata.values() if t is not None]
+                  + [o for (_, o) in rowdata.values()])
+        allpts = np.vstack(allpts)
         lo, hi = allpts.min(0), allpts.max(0)
         pad = (hi - lo) * 0.02 + 1
         return lo - pad, hi + pad
 
-    fig = plt.figure(figsize=(18, 9))
-    fig.subplots_adjust(left=0.02, right=0.99, top=0.95, bottom=0.07, wspace=0.0, hspace=0.0)
-    for r, (label, rowdata, lim) in enumerate(
-            [("Training trajectory", r1, limits(r1)), ("Prediction (test)", r2, limits(r2))]):
+    fig = plt.figure(figsize=(14, 9))
+    fig.subplots_adjust(left=0.03, right=0.99, top=0.95, bottom=0.07, wspace=0.0, hspace=0.0)
+    rows = [("Training trajectory", r1, r1_ref, DATASET_OBJ_ORDER, limits(r1, r1_ref)),
+            ("Prediction (test)", r2, r2_ref, HTS_OBJ_ORDER, limits(r2, r2_ref))]
+    for r, (label, rowdata, ref, obj_order, lim) in enumerate(rows):
         lo, hi = lim
         for c, col in enumerate(COLS):
-            ax = fig.add_subplot(2, 4, r * 4 + c + 1, projection="3d")
+            ax = fig.add_subplot(2, 3, r * 3 + c + 1, projection="3d")
             traj, objs = rowdata[col]
-            # row 2: overlay GT faintly behind the prediction
-            if r == 1 and col != "Ground truth":
-                ax.plot(*gt.T, color="black", lw=1.2, alpha=0.35)
+            # Reference (gray dashed) shown in every panel.
+            ax.plot(*ref.T, color=REF_COLOR, lw=2.0, ls="--", alpha=0.9, zorder=2,
+                    label=("Reference" if (r == 0 and c == 0) else None))
             if traj is not None:
-                tcol = PRED_COLOR[col]
-                ax.plot(*traj.T, color=tcol, lw=2.0)
-                # start = circle, end = cross, in the trajectory colour.
-                # Add neutral-coloured legend handles once (top-left panel).
-                start_lbl = "start" if (r == 0 and c == 0) else None
-                end_lbl = "end" if (r == 0 and c == 0) else None
+                tcol = AUG_COLOR if r == 0 else PRED_COLOR
+                ax.plot(*traj.T, color=tcol, lw=2.0, zorder=3)
                 ax.scatter(*traj[0], color=tcol, s=70, marker="o", edgecolor="k", zorder=5)
                 ax.scatter(*traj[-1], color=tcol, s=90, marker="x", linewidths=2.5, zorder=5)
                 if r == 0 and c == 0:
-                    # legend proxies (grey) so 'start'/'end' appear once
-                    ax.scatter([], [], color="grey", s=70, marker="o", edgecolor="k", label=start_lbl)
-                    ax.scatter([], [], color="grey", s=90, marker="x", linewidths=2.5, label=end_lbl)
-            # Object axis order depends on the source: row 0 (training) draws
-            # objects from the live dataset (config.all_objs order); row 1
-            # (prediction) draws from HTs_test (alphabetical order).
-            obj_order = DATASET_OBJ_ORDER if r == 0 else HTS_OBJ_ORDER
+                    ax.scatter([], [], color="grey", s=70, marker="o", edgecolor="k", label="start")
+                    ax.scatter([], [], color="grey", s=90, marker="x", linewidths=2.5, label="end")
             for i, nm in enumerate(obj_order):
                 ax.scatter(*objs[i], color=OBJ_COLOR[nm], s=60, marker="s", edgecolor="k",
                            label=(nm if (r == 0 and c == 0) else None))
             ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1]); ax.set_zlim(lo[2], hi[2])
             ax.view_init(**VIEW)
-            # Fixed flat box aspect (z compressed) so the floor plane stays
-            # horizontal regardless of each row's data z-extent.
             ax.set_box_aspect((1.0, 1.0, 0.45))
-            # Axis labels (no tick labels, to stay uncluttered).
             ax.set_xticklabels([]); ax.set_yticklabels([]); ax.set_zticklabels([])
             ax.tick_params(length=0)
             ax.set_xlabel("x (mm)", fontsize=15, labelpad=-8)
@@ -185,9 +179,21 @@ def make_fig(action, action_idx):
             if c == 0:
                 ax.text2D(-0.08, 0.5, label, transform=ax.transAxes, rotation=90,
                           va="center", fontsize=20, fontweight="bold")
-    # Legend along the bottom so it never overlaps the column titles.
+    # Legend along the bottom. Build explicit proxies so both trajectory types
+    # (augmented = red, prediction = blue) are explained alongside the reference.
+    from matplotlib.lines import Line2D
     handles, labels = fig.axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", fontsize=18, ncol=6,
+    proxies = [
+        Line2D([], [], color=REF_COLOR, lw=2.0, ls="--", label="Reference (GT)"),
+        Line2D([], [], color=AUG_COLOR, lw=2.0, label="Augmented demo"),
+        Line2D([], [], color=PRED_COLOR, lw=2.0, label="Prediction"),
+    ]
+    # Drop the auto "Reference" entry (replaced by the explicit proxy) but keep
+    # start/end + object handles.
+    keep = [(h, l) for h, l in zip(handles, labels) if l not in ("Reference",)]
+    handles = proxies + [h for h, _ in keep]
+    labels = [p.get_label() for p in proxies] + [l for _, l in keep]
+    fig.legend(handles, labels, loc="lower center", fontsize=18, ncol=9,
                frameon=False, bbox_to_anchor=(0.5, 0.0))
     out = OUT / f"aug3d_{action}.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")

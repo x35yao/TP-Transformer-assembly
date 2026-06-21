@@ -92,7 +92,7 @@ def main():
     T = gt_q.shape[0]
     t = np.arange(T)
 
-    fig, axes = plt.subplots(4, 1, figsize=(9, 8), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(14, 5), sharex=True)
     for r, (ax, col_name) in enumerate(zip(axes, QUAT_NAMES)):
         ax.plot(t, gt_q[:, r], color=GT_COLOR, lw=2.0, ls="-", label="Ground truth",
                 zorder=3)
@@ -112,7 +112,8 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=6, fontsize=13,
                frameon=False, bbox_to_anchor=(0.5, 0.0))
-    fig.tight_layout(rect=[0, 0.05, 1, 1])
+    fig.subplots_adjust(hspace=0.18)
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
     out = OUT / "ori_sample_traj_action_2.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
     fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")

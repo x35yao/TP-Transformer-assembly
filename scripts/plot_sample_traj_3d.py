@@ -1,12 +1,12 @@
 """Single-method 3D sample-trajectory panels (K=15), for a 5x3 LaTeX grid.
 
 One bare PNG/EPS per (subtask, method): a single 3D axis showing the
-ground-truth trajectory (gray dashed) and that method's prediction (solid,
-method colour), with objects as squares (bolt green, nut yellow, bin black,
-jig purple) and start=circle / end=cross markers. The panels carry NO title
-and NO legend (those are added once in LaTeX: column headers = subtasks,
-row labels = methods, plus a single shared legend image) but DO keep the
-x/y/z (mm) axis labels.
+ground-truth trajectory (red dashed -- a visualization reference)
+and that method's prediction (solid, method colour), with objects as squares
+(bolt green, nut yellow, bin black, jig purple) and start=circle / end=cross
+markers. The panels carry NO title and NO legend (those are added once in
+LaTeX: column headers = subtasks, row labels = methods, plus a single shared
+legend image) but DO keep the x/y/z (mm) axis labels.
 
 We pick the (seed, demo) cell per subtask (see CELL_OVERRIDE) and use the same
 cell for every method so the panels are comparable.
@@ -36,13 +36,16 @@ OUT.mkdir(parents=True, exist_ok=True)
 SEEDS = [9871, 9872, 9873, 9874, 9875]
 K = 15
 
+# Object square colours (squares, so they don't conflict with the dashed
+# trajectory lines): bolt green, nut yellow, bin black, jig purple.
 OBJ_COLOR = {"bolt": "#2ca02c", "nut": "#e8d100", "bin": "#000000", "jig": "#9467bd"}
 # HTs_test object axis is alphabetical (prepare_baseline_dataset sorts the list).
 HTS_OBJ_ORDER = ["bin", "bolt", "jig", "nut"]
-# Prediction methods (dashed) + their colours.
+# Global method colour convention (shared across the paper figures).
+GT_COLOR = "#d62728"  # red, dashed -- a visualization reference line
 METHODS = ["TP-Transformer", "TP-GMM", "TP-ProMP", "CNEP", "CNMP"]
-METHOD_COLOR = {"TP-Transformer": "#1f77b4", "TP-GMM": "#d62728", "TP-ProMP": "#2ca02c",
-                "CNEP": "#9467bd", "CNMP": "#ff7f0e"}
+METHOD_COLOR = {"TP-Transformer": "#1f77b4", "TP-GMM": "#2ca02c", "TP-ProMP": "#9467bd",
+                "CNEP": "#17becf", "CNMP": "#ff7f0e"}
 VIEW = dict(elev=22, azim=-60)
 
 dset = pickle.load(open(DATA, "rb"))
@@ -141,13 +144,13 @@ def make_figs(action, action_idx):
         fig = plt.figure(figsize=(6, 5))
         ax = fig.add_subplot(111, projection="3d")
 
-        # Ground truth: gray dashed.
-        ax.plot(*gt.T, color="0.5", lw=2.0, ls="--")
-        ax.scatter(*gt[0], color="0.5", s=70, marker="o", edgecolor="k", zorder=5)
-        ax.scatter(*gt[-1], color="0.5", s=90, marker="x", linewidths=2.5, zorder=5)
+        # Ground truth: red dashed -- a visualization reference.
+        ax.plot(*gt.T, color=GT_COLOR, lw=2.0, ls="--", alpha=0.9, zorder=2)
+        ax.scatter(*gt[0], color=GT_COLOR, s=70, marker="o", edgecolor="k", zorder=5)
+        ax.scatter(*gt[-1], color=GT_COLOR, s=90, marker="x", linewidths=2.5, zorder=5)
         # Prediction: solid, method colour.
         if pr is not None:
-            ax.plot(*pr.T, color=col, lw=2.5)
+            ax.plot(*pr.T, color=col, lw=2.5, ls="-")
             ax.scatter(*pr[0], color=col, s=70, marker="o", edgecolor="k", zorder=6)
             ax.scatter(*pr[-1], color=col, s=90, marker="x", linewidths=2.5, zorder=6)
         # Objects: squares.
@@ -175,8 +178,8 @@ def make_figs(action, action_idx):
 def make_legend():
     """One shared horizontal legend strip for the whole 5x3 grid."""
     handles = [
-        Line2D([], [], color="0.5", lw=2.0, ls="--", label="Ground truth"),
-        Line2D([], [], color="black", lw=2.5, label="Prediction"),
+        Line2D([], [], color=GT_COLOR, lw=2.0, ls="--", label="Ground truth"),
+        Line2D([], [], color="black", lw=2.5, ls="-", label="Prediction"),
         Line2D([], [], color="none", marker="o", markerfacecolor="0.7",
                markeredgecolor="k", markersize=9, label="start"),
         Line2D([], [], color="none", marker="x", markeredgecolor="0.3",

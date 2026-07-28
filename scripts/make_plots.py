@@ -45,6 +45,7 @@ COLORS = {
     "TP-ProMP":       "#9467bd",
     "CNEP":           "#17becf",
     "CNMP":           "#ff7f0e",
+    "DP-CNN":         "#8c564b",
     "TP-aug":         "#1f77b4",
     "No-aug":         "#2ca02c",
     "Random rotation": "#d62728",
@@ -98,6 +99,15 @@ def collect_exp1():
                 out[(disp, regime)][r["action"]][K] = (
                     r["ade_mean_mm"], r["ade_std_mm"], r["ndq_mean"], r["ndq_std"]
                 )
+    # --- Diffusion Policy (CNN, tp-aug, faithful config), per-subtask ---
+    for K in KS:
+        rows = load_summary(RESULTS / "exp1_dp_cnn" / f"k{K}" / "summary.csv")
+        for r in rows:
+            if r["model"] != "dp_cnn":
+                continue
+            out[("DP-CNN", None)][r["action"]][K] = (
+                r["ade_mean_mm"], r["ade_std_mm"], r["ndq_mean"], r["ndq_std"]
+            )
     return out
 
 
@@ -116,16 +126,17 @@ def collect_exp2():
 
 def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = False, ymax: float | None = None):
     data = collect_exp1()
-    # IEEE-friendly font sizes (legible at single-column width).
+    # Larger fonts + shorter panels: the figure occupies less vertical space
+    # while the text stays legible at reduced size in the paper.
     plt.rcParams.update({
-        "font.size": 16,
-        "axes.titlesize": 20,
-        "axes.labelsize": 18,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "legend.fontsize": 14,
+        "font.size": 20,
+        "axes.titlesize": 26,
+        "axes.labelsize": 24,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+        "legend.fontsize": 18,
     })
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3.2), sharey=True)
     for i, action in enumerate(ACTIONS):
         ax = axes[i]
         ax.set_title(f"Subtask {i + 1}")
@@ -171,14 +182,14 @@ def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = 
 def plot_exp1_legend(fname: str = "exp1_methods_legend.png"):
     """Standalone horizontal legend strip for the K-sweep method curves."""
     from matplotlib.lines import Line2D
-    methods = ["TP-Transformer", "TP-GMM", "TP-ProMP", "CNEP", "CNMP"]
+    methods = ["TP-Transformer", "TP-GMM", "TP-ProMP", "CNEP", "CNMP", "DP-CNN"]
     handles = [
-        Line2D([], [], color=COLORS[m], lw=2.0, marker="o", label=m)
+        Line2D([], [], color=COLORS[m], lw=3.0, marker="o", markersize=9, label=m)
         for m in methods
     ]
-    fig = plt.figure(figsize=(12, 0.6))
+    fig = plt.figure(figsize=(14, 0.7))
     fig.legend(handles=handles, loc="center", ncol=len(methods), frameon=False,
-               fontsize=15, handletextpad=0.5, columnspacing=1.6)
+               fontsize=20, handletextpad=0.5, columnspacing=1.6)
     out = FIG_DIR / fname
     fig.savefig(out, dpi=200, bbox_inches="tight")
     fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")

@@ -61,3 +61,4 @@ TODO.md
 
 # Local data archive (the unzipped contents under data/raw/ are what's used).
 data/raw_data.zip
+baselines/diffusion_policy_upstream/

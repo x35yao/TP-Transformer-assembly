@@ -43,13 +43,29 @@ COLORS = {
     "TP-Transformer": "#1f77b4",
     "TP-GMM":         "#2ca02c",
     "TP-ProMP":       "#9467bd",
-    "CNEP":           "#17becf",
-    "CNMP":           "#ff7f0e",
-    "DP-CNN":         "#8c564b",
+    # CNEP / CNMP: shared hue (magenta/pink), two shades. Kept clear of the
+    # blue TP-Transformer, purple TP-ProMP and green TP-GMM.
+    "CNEP":           "#c2185b",   # dark magenta
+    "CNMP":           "#f06fa8",   # light pink
+    # Diffusion Policy: shared hue (brown/orange family), four shades. No-aug
+    # arms are also dashed, so shade + style together separate all four.
+    "DP (CNN)":                   "#8c3b12",   # dark brown  (CNN, aug)
+    "DP (Transformer)":           "#d1622b",   # mid orange-brown (TF, aug)
+    "DP (CNN, no-aug)":           "#b5651d",   # medium brown (CNN, no-aug)
+    "DP (Transformer, no-aug)":   "#e6a06b",   # light tan   (TF, no-aug)
     "TP-aug":         "#1f77b4",
     "No-aug":         "#2ca02c",
     "Random rotation": "#d62728",
 }
+
+# Per-method plot style for the K-sweep curves: (linestyle, linewidth, zorder).
+# No-aug arms dashed; TP-Transformer drawn last (high zorder) with a wider line.
+def _curve_style(method: str):
+    if method == "TP-Transformer":
+        return ("-", 3.6, 10)          # wider + on top
+    if "no-aug" in method:
+        return ("--", 2.0, 3)          # dashed for non-augmented DP arms
+    return ("-", 2.0, 3)
 
 
 def load_summary(csv_path: Path) -> list[dict]:
@@ -99,15 +115,23 @@ def collect_exp1():
                 out[(disp, regime)][r["action"]][K] = (
                     r["ade_mean_mm"], r["ade_std_mm"], r["ndq_mean"], r["ndq_std"]
                 )
-    # --- Diffusion Policy (CNN, tp-aug, faithful config), per-subtask ---
-    for K in KS:
-        rows = load_summary(RESULTS / "exp1_dp_cnn" / f"k{K}" / "summary.csv")
-        for r in rows:
-            if r["model"] != "dp_cnn":
-                continue
-            out[("DP-CNN", None)][r["action"]][K] = (
-                r["ade_mean_mm"], r["ade_std_mm"], r["ndq_mean"], r["ndq_std"]
-            )
+    # --- Diffusion Policy: 4 arms (CNN/Transformer x tp/no-aug), per-subtask,
+    # faithful 7-D config. All share one colour; no-aug arms are dashed.
+    dp_arms = [
+        ("DP (CNN)",              "exp1_dp_cnn",      "dp_cnn"),
+        ("DP (Transformer)",      "exp1_dp_tf",       "dp_tf"),
+        ("DP (CNN, no-aug)",      "exp1_dp_cnn_none", "dp_cnn"),
+        ("DP (Transformer, no-aug)", "exp1_dp_tf_none", "dp_tf"),
+    ]
+    for disp, subdir, model in dp_arms:
+        for K in KS:
+            rows = load_summary(RESULTS / subdir / f"k{K}" / "summary.csv")
+            for r in rows:
+                if r["model"] != model:
+                    continue
+                out[(disp, None)][r["action"]][K] = (
+                    r["ade_mean_mm"], r["ade_std_mm"], r["ndq_mean"], r["ndq_std"]
+                )
     return out
 
 
@@ -146,7 +170,9 @@ def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = 
         if i == 0:
             ax.set_ylabel(ylabel)
         ax.set_xticks(KS)
-        for (method, regime), by_action in data.items():
+        # Draw TP-Transformer last so its wider line sits on top of the others.
+        items = sorted(data.items(), key=lambda kv: kv[0][0] == "TP-Transformer")
+        for (method, regime), by_action in items:
             if action not in by_action:
                 continue
             # Plots show only the paper-faithful multi-context regime for the
@@ -157,13 +183,17 @@ def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = 
             xs = sorted(by_K.keys())
             means = [by_K[k][metric_idx * 2] for k in xs]
             stds = [by_K[k][metric_idx * 2 + 1] for k in xs]
+            ls, lw, zo = _curve_style(method)
             ax.errorbar(
                 xs, means, yerr=stds,
-                marker="o", capsize=4, lw=2.0,
+                marker="o", capsize=4, lw=lw, ls=ls, zorder=zo,
                 label=method, color=COLORS.get(method, None),
             )
         if log_scale:
             ax.set_yscale("log")
+            # Raise the lower limit to just under 10^1 so the curves spread out
+            # (ADE panel); the smallest TP-Transformer values sit ~10-20 mm.
+            ax.set_ylim(bottom=8)
         if ymax is not None:
             ax.set_ylim(top=ymax)
         # ADE/NDQ are non-negative; keep the linear-scale floor at 0 so wide
@@ -182,14 +212,29 @@ def plot_exp1_curve(metric_idx: int, ylabel: str, fname: str, log_scale: bool = 
 def plot_exp1_legend(fname: str = "exp1_methods_legend.png"):
     """Standalone horizontal legend strip for the K-sweep method curves."""
     from matplotlib.lines import Line2D
-    methods = ["TP-Transformer", "TP-GMM", "TP-ProMP", "CNEP", "CNMP", "DP-CNN"]
     handles = [
-        Line2D([], [], color=COLORS[m], lw=3.0, marker="o", markersize=9, label=m)
-        for m in methods
+        Line2D([], [], color=COLORS["TP-Transformer"], lw=3.6, marker="o",
+               markersize=9, label="TP-Transformer"),
+        Line2D([], [], color=COLORS["TP-GMM"], lw=2.0, marker="o",
+               markersize=9, label="TP-GMM"),
+        Line2D([], [], color=COLORS["TP-ProMP"], lw=2.0, marker="o",
+               markersize=9, label="TP-ProMP"),
+        Line2D([], [], color=COLORS["CNEP"], lw=2.0, marker="o",
+               markersize=9, label="CNEP"),
+        Line2D([], [], color=COLORS["CNMP"], lw=2.0, marker="o",
+               markersize=9, label="CNMP"),
+        Line2D([], [], color=COLORS["DP (CNN)"], lw=2.0, ls="-", marker="o",
+               markersize=9, label="DP (CNN)"),
+        Line2D([], [], color=COLORS["DP (Transformer)"], lw=2.0, ls="-", marker="o",
+               markersize=9, label="DP (Transformer)"),
+        Line2D([], [], color=COLORS["DP (CNN, no-aug)"], lw=2.0, ls="--", marker="o",
+               markersize=9, label="DP (CNN, no-aug)"),
+        Line2D([], [], color=COLORS["DP (Transformer, no-aug)"], lw=2.0, ls="--", marker="o",
+               markersize=9, label="DP (Transformer, no-aug)"),
     ]
-    fig = plt.figure(figsize=(14, 0.7))
-    fig.legend(handles=handles, loc="center", ncol=len(methods), frameon=False,
-               fontsize=20, handletextpad=0.5, columnspacing=1.6)
+    fig = plt.figure(figsize=(20, 0.7))
+    fig.legend(handles=handles, loc="center", ncol=len(handles), frameon=False,
+               fontsize=17, handletextpad=0.4, columnspacing=1.1)
     out = FIG_DIR / fname
     fig.savefig(out, dpi=200, bbox_inches="tight")
     fig.savefig(out.with_suffix(".eps"), bbox_inches="tight")
